@@ -214,35 +214,6 @@
           }
         },
         {
-          "name": "01.5 Divert past AI summary",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "pm.environment.set('pollCount', 0);"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"fromElementId\": \"Task_HistorySummary\",\n  \"toElementId\": \"Task_Triage\",\n  \"variables\": {\n    \"historySummary\": \"65F, hypertension and T2DM. Central chest pain radiating to left arm, onset 2h. Prior MI 2019.\"\n  }\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/diversion",
-              "host": ["{{baseUrl}}"],
-              "path": ["cases", "{{processInstanceKey}}", "diversion"]
-            },
-            "description": "Terminates the blocked AI task and activates triage in one atomic modification, seeding the summary the AI step would have produced.\n\nVariables here are set at process scope, so later steps in other scopes — the archive worker among them — can read them.\n\nDelete this request once the connector secret exists."
-          }
-        },
-        {
           "name": "01.6 Await Cardiology Workup",
           "event": [
             {
@@ -731,86 +702,6 @@
           }
         },
         {
-          "name": "01.19 Await discharge AI incident",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const incidents = pm.response.json();",
-                  "const hit = incidents.find(i => i.elementId === 'Task_DischargeSummary' && i.state === 'ACTIVE');",
-                  "",
-                  "if (hit) {",
-                  "  pm.environment.set('pollCount', 0);",
-                  "  pm.test('discharge AI blocked on the same missing secret', () => pm.expect(hit.errorMessage).to.include('OPENAI_API_KEY'));",
-                  "  console.log('Reached Task_DischargeSummary — a step the journey could not get to before the loop converged.');",
-                  "} else {",
-                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  pm.environment.set('pollCount', n);",
-                  "  if (n > 30) {",
-                  "    pm.environment.set('pollCount', 0);",
-                  "    console.log('No discharge AI incident — the OPENAI_API_KEY secret may now be configured. Skip 01.20 if so.');",
-                  "  } else {",
-                  "    pm.execution.setNextRequest(pm.info.requestName);",
-                  "  }",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/incidents",
-              "host": ["{{baseUrl}}"],
-              "path": ["cases", "{{processInstanceKey}}", "incidents"]
-            },
-            "description": "Once the gate opens, the journey reaches the second AI task and hits the same missing connector secret. Filtered on state ACTIVE so the resolved history-summary incident from 01.4 is not mistaken for this one."
-          }
-        },
-        {
-          "name": "01.20 Divert past discharge AI summary",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "if (pm.response.code === 409) {",
-                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  pm.environment.set('pollCount', n);",
-                  "  if (n > 20) {",
-                  "    pm.environment.set('pollCount', 0);",
-                  "    pm.test('Diversion never became possible', () => pm.expect.fail(pm.response.json().message));",
-                  "  } else {",
-                  "    pm.execution.setNextRequest(pm.info.requestName);",
-                  "  }",
-                  "} else {",
-                  "  pm.environment.set('pollCount', 0);",
-                  "  pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"fromElementId\": \"Task_DischargeSummary\",\n  \"toElementId\": \"Task_DischargeSignoff\",\n  \"variables\": {\n    \"dischargeSummary\": \"Admitted with chest pain. ACS ruled out. Vitals recovered on a revised plan. Discharged with cardiology follow-up in 2 weeks.\"\n  }\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/diversion",
-              "host": ["{{baseUrl}}"],
-              "path": ["cases", "{{processInstanceKey}}", "diversion"]
-            },
-            "description": "Steps past the blocked AI task with the summary it would have drafted. This is the connector-secret workaround only — the vitals loop now converges unaided.\n\nDelete this request once the secret exists."
-          }
-        },
-        {
           "name": "01.21 Await Discharge Sign-off",
           "event": [
             {
@@ -1104,47 +995,6 @@
               "path": ["cases", "{{errProcessInstanceKey}}", "incidents"]
             },
             "description": "Waits for the AI task to actually fail before 02.4 tries to divert past it. Without this the diversion races the engine and returns 409."
-          }
-        },
-        {
-          "name": "02.4 Divert past AI summary",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "if (pm.response.code === 409) {",
-                  "  // The element was not active yet. Retry rather than failing the run.",
-                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  pm.environment.set('pollCount', n);",
-                  "  if (n > 15) {",
-                  "    pm.environment.set('pollCount', 0);",
-                  "    pm.test('Diversion never became possible', () => pm.expect.fail(pm.response.json().message));",
-                  "  } else {",
-                  "    pm.execution.setNextRequest(pm.info.requestName);",
-                  "  }",
-                  "} else {",
-                  "  pm.environment.set('pollCount', 0);",
-                  "  pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"fromElementId\": \"Task_HistorySummary\",\n  \"toElementId\": \"Task_Triage\",\n  \"variables\": {\n    \"historySummary\": \"Exception-path run: diagnostics system reported offline.\"\n  }\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/cases/{{errProcessInstanceKey}}/diversion",
-              "host": ["{{baseUrl}}"],
-              "path": ["cases", "{{errProcessInstanceKey}}", "diversion"]
-            },
-            "description": "Same AI workaround as the happy path. Retries itself on 409, which means the AI task had not yet become active."
           }
         },
         {
