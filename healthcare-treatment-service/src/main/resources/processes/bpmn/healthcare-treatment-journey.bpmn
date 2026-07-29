@@ -31,12 +31,12 @@
           so the job type is io.camunda:http-json:1 (element template io.camunda.connectors.OpenAI.v1).
           Failure handling: bounded retries plus an explicit connection timeout, so a hanging
           model call surfaces as an incident rather than blocking the journey indefinitely.
-          Requires an OPENAI_API_KEY secret in Camunda Console.
+          Requires an OPENAI_API_TOKEN secret in Camunda Console.
         -->
         <zeebe:taskDefinition type="io.camunda:http-json:1" retries="2" />
         <zeebe:ioMapping>
           <zeebe:input source="bearer" target="authentication.type" />
-          <zeebe:input source="{{secrets.OPENAI_API_KEY}}" target="authentication.token" />
+          <zeebe:input source="{{secrets.OPENAI_API_TOKEN}}" target="authentication.token" />
           <zeebe:input source="POST" target="method" />
           <zeebe:input source="https://api.openai.com/v1/chat/completions" target="url" />
           <zeebe:input source="=20" target="connectionTimeoutInSeconds" />
@@ -334,7 +334,7 @@
         <zeebe:taskDefinition type="io.camunda:http-json:1" retries="2" />
         <zeebe:ioMapping>
           <zeebe:input source="bearer" target="authentication.type" />
-          <zeebe:input source="{{secrets.OPENAI_API_KEY}}" target="authentication.token" />
+          <zeebe:input source="{{secrets.OPENAI_API_TOKEN}}" target="authentication.token" />
           <zeebe:input source="POST" target="method" />
           <zeebe:input source="https://api.openai.com/v1/chat/completions" target="url" />
           <zeebe:input source="=20" target="connectionTimeoutInSeconds" />
