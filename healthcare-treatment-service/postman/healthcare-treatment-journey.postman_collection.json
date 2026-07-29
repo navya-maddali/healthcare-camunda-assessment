@@ -1,0 +1,1399 @@
+{
+  "info": {
+    "_postman_id": "b7e41c92-6a3d-4f18-9c02-1d5f8e3a7b40",
+    "name": "Healthcare Treatment Journey — Camunda 8.9",
+    "description": "End-to-end driver for the inpatient admission-to-discharge process.\n\n## Setup\n\n1. Import `healthcare-treatment-journey.postman_environment.json` and select it.\n2. Fill in `clientId`, `clientSecret`, `clusterId`, `region` from Camunda Console.\n3. Run **00 Auth → Get access token** once. Every other request reuses the cached token and the collection pre-request script refreshes it automatically ~60s before expiry.\n\n## Running\n\nFolders are ordered. `Runner` works on folders 02 and 03 top to bottom, but the process is asynchronous: Camunda needs a moment between a completion and the next task appearing. Each polling request retries itself via `setNextRequest`, so the Runner handles this without manual delays.\n\n## Known blockers (verified 2026-07-29)\n\n- **AI tasks incident** without an `OPENAI_API_KEY` connector secret in Camunda Console. `02.5 Skip AI history summary` routes around this via process-instance modification.\n- **Vitals loop does not converge.** The framework IdempotencyGuard keys on job type + elementId + caseId, which are identical on every loop pass, so the second `vitals-monitoring` execution is treated as a replay and completed without running. `vitalsTrend` stays `DETERIORATING` and the discharge gate never opens. `02.9 Force discharge route` works around it.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+  },
+  "event": [
+    {
+      "listen": "prerequisite",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Refresh the OAuth token when it is missing or within 60s of expiry.",
+          "// Skipped for the token request itself to avoid infinite recursion.",
+          "if (pm.info.requestName === 'Get access token') { return; }",
+          "",
+          "const expiresAt = Number(pm.environment.get('tokenExpiresAt') || 0);",
+          "const token = pm.environment.get('accessToken');",
+          "",
+          "if (token && Date.now() < expiresAt - 60000) { return; }",
+          "",
+          "pm.sendRequest({",
+          "  url: 'https://login.cloud.camunda.io/oauth/token',",
+          "  method: 'POST',",
+          "  header: { 'Content-Type': 'application/json' },",
+          "  body: {",
+          "    mode: 'raw',",
+          "    raw: JSON.stringify({",
+          "      grant_type: 'client_credentials',",
+          "      client_id: pm.environment.get('clientId'),",
+          "      client_secret: pm.environment.get('clientSecret'),",
+          "      audience: 'zeebe.camunda.io'",
+          "    })",
+          "  }",
+          "}, (err, res) => {",
+          "  if (err || res.code !== 200) {",
+          "    console.error('Token refresh failed', err || res.text());",
+          "    return;",
+          "  }",
+          "  const body = res.json();",
+          "  pm.environment.set('accessToken', body.access_token);",
+          "  pm.environment.set('tokenExpiresAt', Date.now() + body.expires_in * 1000);",
+          "  console.log('Token refreshed, expires in ' + body.expires_in + 's');",
+          "});"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Applies to every request: surface auth and server faults immediately",
+          "// rather than letting a later assertion fail for an unrelated reason.",
+          "pm.test('Not unauthorised', () => pm.expect(pm.response.code).to.not.be.oneOf([401, 403]));",
+          "pm.test('No server error', () => pm.expect(pm.response.code).to.be.below(500));"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "https://{{region}}.zeebe.camunda.io/{{clusterId}}/v2" }
+  ],
+  "item": [
+    {
+      "name": "00 Auth",
+      "item": [
+        {
+          "name": "Get access token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('access_token present', () => pm.expect(body.access_token).to.be.a('string').and.not.empty);",
+                  "",
+                  "pm.environment.set('accessToken', body.access_token);",
+                  "pm.environment.set('tokenExpiresAt', Date.now() + body.expires_in * 1000);",
+                  "console.log('Token valid for ' + body.expires_in + 's');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"grant_type\": \"client_credentials\",\n  \"client_id\": \"{{clientId}}\",\n  \"client_secret\": \"{{clientSecret}}\",\n  \"audience\": \"zeebe.camunda.io\"\n}"
+            },
+            "url": {
+              "raw": "https://login.cloud.camunda.io/oauth/token",
+              "protocol": "https",
+              "host": ["login", "cloud", "camunda", "io"],
+              "path": ["oauth", "token"]
+            },
+            "description": "Client-credentials grant against Camunda SaaS. Caches the token and its expiry in the environment; the collection pre-request script refreshes it automatically."
+          }
+        },
+        {
+          "name": "Check cluster topology",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('Gateway is 8.9.x', () => pm.expect(body.gatewayVersion).to.match(/^8\\.9\\./));",
+                  "pm.test('Brokers reachable', () => pm.expect(body.brokers.length).to.be.above(0));",
+                  "console.log('Cluster ' + body.gatewayVersion + ', ' + body.brokers.length + ' broker(s)');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/topology", "host": ["{{baseUrl}}"], "path": ["topology"] },
+            "description": "Confirms credentials, cluster id and region are all correct before anything else runs."
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 Deploy",
+      "item": [
+        {
+          "name": "Deploy BPMN + DMN + forms",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('deploymentKey returned', () => pm.expect(body.deploymentKey).to.be.a('string'));",
+                  "",
+                  "const kinds = { process: 0, decision: 0, form: 0 };",
+                  "(body.deployments || []).forEach(d => {",
+                  "  if (d.processDefinition) {",
+                  "    kinds.process++;",
+                  "    pm.environment.set('processDefinitionKey', d.processDefinition.processDefinitionKey);",
+                  "  }",
+                  "  if (d.decisionDefinition) { kinds.decision++; }",
+                  "  if (d.form) { kinds.form++; }",
+                  "});",
+                  "",
+                  "pm.test('1 process deployed', () => pm.expect(kinds.process).to.eql(1));",
+                  "pm.test('2 decisions deployed', () => pm.expect(kinds.decision).to.eql(2));",
+                  "pm.test('8 forms deployed', () => pm.expect(kinds.form).to.eql(8));",
+                  "console.log('Deployed', JSON.stringify(kinds));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "resources", "type": "file", "src": [], "description": "processes/bpmn/healthcare-treatment-journey.bpmn" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/dmn/triage-care-pathway.dmn" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/dmn/discharge-readiness.dmn" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/registration-form.form" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/cardiology-workup-form.form" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/treatment-plan-form.form" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/specialist-consult-form.form" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/treatment-admin-form.form" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/discharge-form.form" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/physician-escalation-form.form" },
+                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/clinical-director-form.form" }
+              ]
+            },
+            "url": { "raw": "{{baseUrl}}/deployments", "host": ["{{baseUrl}}"], "path": ["deployments"] },
+            "description": "Postman cannot store file paths in an exported collection, so each `resources` row has an empty file picker. Select the file named in its Description column, under `src/main/resources/processes/`.\n\nDeploy all 11 together — the BPMN references forms and decisions by id, so a partial deployment leaves dangling references."
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 Happy path",
+      "item": [
+        {
+          "name": "02.1 Start instance",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Unique caseId per run: it is both the message correlation key and the",
+                  "// archive primary key, so reusing one collides on the second run.",
+                  "pm.environment.set('caseId', 'CASE-' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('processInstanceKey returned', () => pm.expect(body.processInstanceKey).to.be.a('string'));",
+                  "pm.test('Correct process', () => pm.expect(body.processDefinitionId).to.eql('healthcare-treatment-journey'));",
+                  "",
+                  "pm.environment.set('processInstanceKey', body.processInstanceKey);",
+                  "console.log('Instance ' + body.processInstanceKey + ' for ' + pm.environment.get('caseId'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"processDefinitionId\": \"healthcare-treatment-journey\",\n  \"variables\": {\n    \"caseId\": \"{{caseId}}\",\n    \"patientId\": \"PAT-1001\",\n    \"patientName\": \"Asha Verma\",\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"MODERATE\"\n  }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/process-instances", "host": ["{{baseUrl}}"], "path": ["process-instances"] },
+            "description": "ER / CHEST_PAIN / MODERATE matches triage rule_02, so the decision returns [\"ECG\",\"CARDIOLOGY_WORKUP\"] and the diagnostics sub-process fans out to two parallel branches."
+          }
+        },
+        {
+          "name": "02.2 Await Registration task",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Zeebe is eventually consistent; poll until the task is exported to the",
+                  "// secondary storage that backs the search API.",
+                  "const body = pm.response.json();",
+                  "const task = (body.items || []).find(t => t.elementId === 'Task_Registration');",
+                  "",
+                  "if (!task) {",
+                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  if (tries > 15) {",
+                  "    pm.environment.unset('pollCount');",
+                  "    pm.test('Registration task appeared', () => pm.expect.fail('Not found after 15 polls'));",
+                  "    return;",
+                  "  }",
+                  "  pm.environment.set('pollCount', tries);",
+                  "  console.log('Waiting for Task_Registration, attempt ' + tries);",
+                  "  setTimeout(() => {}, 2000);",
+                  "  pm.execution.setNextRequest('02.2 Await Registration task');",
+                  "  return;",
+                  "}",
+                  "",
+                  "pm.environment.unset('pollCount');",
+                  "pm.environment.set('userTaskKey', task.userTaskKey);",
+                  "pm.test('Registration task created', () => pm.expect(task.state).to.eql('CREATED'));",
+                  "console.log('Task_Registration key ' + task.userTaskKey);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": {\n    \"processInstanceKey\": \"{{processInstanceKey}}\",\n    \"state\": \"CREATED\"\n  },\n  \"sort\": [{ \"field\": \"creationDate\", \"order\": \"ASC\" }]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/user-tasks/search", "host": ["{{baseUrl}}"], "path": ["user-tasks", "search"] }
+          }
+        },
+        {
+          "name": "02.3 Complete Registration",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "console.log('Registration completed — AI history summary runs next');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"consentObtained\": true,\n    \"allergiesNotes\": \"No known drug allergies\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "host": ["{{baseUrl}}"],
+              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+            },
+            "description": "Candidate group `registration-desk`. Completing this releases the token to Task_HistorySummary, which incidents unless the OPENAI_API_KEY connector secret exists."
+          }
+        },
+        {
+          "name": "02.4 Check AI incident",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const items = pm.response.json().items || [];",
+                  "const ai = items.find(i => i.elementId === 'Task_HistorySummary');",
+                  "",
+                  "if (!ai) {",
+                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  if (tries > 12) {",
+                  "    pm.environment.unset('pollCount');",
+                  "    console.log('No AI incident — OPENAI_API_KEY appears to be configured. Skip 02.5.');",
+                  "    return;",
+                  "  }",
+                  "  pm.environment.set('pollCount', tries);",
+                  "  pm.execution.setNextRequest('02.4 Check AI incident');",
+                  "  return;",
+                  "}",
+                  "",
+                  "pm.environment.unset('pollCount');",
+                  "pm.test('Incident is the missing OpenAI secret', () => pm.expect(ai.errorMessage).to.include('OPENAI_API_KEY'));",
+                  "console.log('Expected incident present — 02.5 will route around it');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/incidents/search", "host": ["{{baseUrl}}"], "path": ["incidents", "search"] },
+            "description": "Asserts the documented failure mode rather than hiding it. If you have configured the connector secret this request finds nothing and the run continues normally."
+          }
+        },
+        {
+          "name": "02.5 Skip AI history summary",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Resolve the element instance to terminate. Modification needs the",
+                  "// elementInstanceKey, which is not the same as the incident key.",
+                  "pm.sendRequest({",
+                  "  url: pm.variables.replaceIn('{{baseUrl}}/element-instances/search'),",
+                  "  method: 'POST',",
+                  "  header: {",
+                  "    'Content-Type': 'application/json',",
+                  "    'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
+                  "  },",
+                  "  body: {",
+                  "    mode: 'raw',",
+                  "    raw: JSON.stringify({",
+                  "      filter: {",
+                  "        processInstanceKey: pm.environment.get('processInstanceKey'),",
+                  "        elementId: 'Task_HistorySummary',",
+                  "        state: 'ACTIVE'",
+                  "      }",
+                  "    })",
+                  "  }",
+                  "}, (err, res) => {",
+                  "  if (err) { console.error(err); return; }",
+                  "  const items = res.json().items || [];",
+                  "  if (items.length) {",
+                  "    pm.environment.set('aiElementInstanceKey', items[0].elementInstanceKey);",
+                  "  } else {",
+                  "    console.log('Task_HistorySummary not active — nothing to skip');",
+                  "  }",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "console.log('Token moved to Task_Triage with a stubbed historySummary');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"activateInstructions\": [\n    {\n      \"elementId\": \"Task_Triage\",\n      \"variableInstructions\": [\n        {\n          \"variables\": {\n            \"historySummary\": \"65F, hypertension and T2DM. Central chest pain radiating to left arm, onset 2h. Prior MI 2019.\"\n          }\n        }\n      ]\n    }\n  ],\n  \"terminateInstructions\": [\n    { \"elementInstanceKey\": \"{{aiElementInstanceKey}}\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/process-instances/{{processInstanceKey}}/modification",
+              "host": ["{{baseUrl}}"],
+              "path": ["process-instances", "{{processInstanceKey}}", "modification"]
+            },
+            "description": "Process-instance modification: terminate the incidented AI connector task and activate Task_Triage with a stubbed summary. Standard technique for testing around an unconfigured connector.\n\nSkip this request entirely once OPENAI_API_KEY is set in Camunda Console."
+          }
+        },
+        {
+          "name": "02.6 Verify triage decision",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const items = pm.response.json().items || [];",
+                  "const byName = {};",
+                  "items.forEach(v => { byName[v.name] = v.value; });",
+                  "",
+                  "if (!byName.carePlan) {",
+                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  if (tries > 15) {",
+                  "    pm.environment.unset('pollCount');",
+                  "    pm.test('Triage produced carePlan', () => pm.expect.fail('carePlan never appeared'));",
+                  "    return;",
+                  "  }",
+                  "  pm.environment.set('pollCount', tries);",
+                  "  pm.execution.setNextRequest('02.6 Verify triage decision');",
+                  "  return;",
+                  "}",
+                  "pm.environment.unset('pollCount');",
+                  "",
+                  "// rule_02: ER + CHEST_PAIN + MODERATE",
+                  "pm.test('carePlan is CARDIAC_STANDARD', () => pm.expect(byName.carePlan).to.eql('\"CARDIAC_STANDARD\"'));",
+                  "pm.test('priority is P2', () => pm.expect(byName.priority).to.eql('\"P2\"'));",
+                  "pm.test('ward is CCU', () => pm.expect(byName.assignedWard).to.eql('\"CCU\"'));",
+                  "pm.test('two diagnostic tests fan out', () => {",
+                  "  const tests = JSON.parse(byName.diagnosticTests);",
+                  "  pm.expect(tests).to.have.members(['ECG', 'CARDIOLOGY_WORKUP']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" },\n  \"page\": { \"limit\": 100 }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/variables/search", "host": ["{{baseUrl}}"], "path": ["variables", "search"] },
+            "description": "Asserts the triage DMN (hit policy FIRST) matched rule_02. Variable values come back JSON-encoded, hence the quoted comparisons."
+          }
+        },
+        {
+          "name": "02.7 Complete Cardiology Workup",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The ECG branch is fully automated (lab-test-ordering then",
+                  "// lab-result-ingestion). Only CARDIOLOGY_WORKUP needs a human.",
+                  "const poll = (attempt) => {",
+                  "  pm.sendRequest({",
+                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
+                  "    method: 'POST',",
+                  "    header: {",
+                  "      'Content-Type': 'application/json',",
+                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
+                  "    },",
+                  "    body: {",
+                  "      mode: 'raw',",
+                  "      raw: JSON.stringify({",
+                  "        filter: {",
+                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
+                  "          elementId: 'Task_CardiologyWorkup',",
+                  "          state: 'CREATED'",
+                  "        }",
+                  "      })",
+                  "    }",
+                  "  }, (err, res) => {",
+                  "    const items = (err || !res) ? [] : (res.json().items || []);",
+                  "    if (items.length) {",
+                  "      pm.environment.set('userTaskKey', items[0].userTaskKey);",
+                  "    } else if (attempt < 20) {",
+                  "      poll(attempt + 1);",
+                  "    } else {",
+                  "      console.error('Task_CardiologyWorkup never appeared');",
+                  "    }",
+                  "  });",
+                  "};",
+                  "poll(0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "console.log('Cardiology workup done — multi-instance join closes next');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"testType\": \"CARDIOLOGY_WORKUP\",\n    \"ecgInterpretation\": \"Sinus rhythm, no acute ST changes\",\n    \"echoResult\": \"EF 55%, no regional wall motion abnormality\",\n    \"cardiacRiskLevel\": \"MODERATE\",\n    \"cardiologyNotes\": \"Serial troponins advised\",\n    \"resultsUploaded\": true\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "host": ["{{baseUrl}}"],
+              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+            },
+            "description": "Candidate group `diagnostics-technician`."
+          }
+        },
+        {
+          "name": "02.8 Complete Treatment Plan",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const poll = (attempt) => {",
+                  "  pm.sendRequest({",
+                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
+                  "    method: 'POST',",
+                  "    header: {",
+                  "      'Content-Type': 'application/json',",
+                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
+                  "    },",
+                  "    body: {",
+                  "      mode: 'raw',",
+                  "      raw: JSON.stringify({",
+                  "        filter: {",
+                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
+                  "          elementId: 'Task_TreatmentPlan',",
+                  "          state: 'CREATED'",
+                  "        }",
+                  "      })",
+                  "    }",
+                  "  }, (err, res) => {",
+                  "    const items = (err || !res) ? [] : (res.json().items || []);",
+                  "    if (items.length) {",
+                  "      pm.environment.set('userTaskKey', items[0].userTaskKey);",
+                  "    } else if (attempt < 20) {",
+                  "      poll(attempt + 1);",
+                  "    } else {",
+                  "      console.error('Task_TreatmentPlan never appeared');",
+                  "    }",
+                  "  });",
+                  "};",
+                  "poll(0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"treatmentPlan\": \"Dual antiplatelet therapy, telemetry monitoring, serial troponins q6h\",\n    \"medications\": \"Aspirin 75mg OD, Atorvastatin 40mg OD, Ramipril 5mg OD\",\n    \"consultsRequired\": false\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "host": ["{{baseUrl}}"],
+              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+            },
+            "description": "Candidate group `attending-physician`. Set `consultsRequired` to true to exercise the ad-hoc specialist consult stage instead — see folder 04."
+          }
+        },
+        {
+          "name": "02.9 Complete Treatment Administration",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const poll = (attempt) => {",
+                  "  pm.sendRequest({",
+                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
+                  "    method: 'POST',",
+                  "    header: {",
+                  "      'Content-Type': 'application/json',",
+                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
+                  "    },",
+                  "    body: {",
+                  "      mode: 'raw',",
+                  "      raw: JSON.stringify({",
+                  "        filter: {",
+                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
+                  "          elementId: 'Task_TreatmentAdmin',",
+                  "          state: 'CREATED'",
+                  "        }",
+                  "      })",
+                  "    }",
+                  "  }, (err, res) => {",
+                  "    const items = (err || !res) ? [] : (res.json().items || []);",
+                  "    if (items.length) {",
+                  "      pm.environment.set('userTaskKey', items[0].userTaskKey);",
+                  "    } else if (attempt < 20) {",
+                  "      poll(attempt + 1);",
+                  "    } else {",
+                  "      console.error('Task_TreatmentAdmin never appeared');",
+                  "    }",
+                  "  });",
+                  "};",
+                  "poll(0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "console.log('Vitals monitoring runs next — first pass deliberately breaches');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"medicationsAdministered\": true,\n    \"observationsRecorded\": true,\n    \"nursingNotes\": \"Patient stable, tolerated medication, no chest pain reported\",\n    \"treatmentStepsCompleted\": true,\n    \"labResultsNormal\": true\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "host": ["{{baseUrl}}"],
+              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+            },
+            "description": "Candidate group `nurse`. Both `treatmentStepsCompleted` and `labResultsNormal` must be true — the discharge-readiness decision reads both."
+          }
+        },
+        {
+          "name": "02.10 Verify vitals alert loop",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const items = pm.response.json().items || [];",
+                  "const byName = {};",
+                  "items.forEach(v => { byName[v.name] = v.value; });",
+                  "",
+                  "if (!byName.dischargeResult) {",
+                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  if (tries > 20) {",
+                  "    pm.environment.unset('pollCount');",
+                  "    pm.test('Discharge decision evaluated', () => pm.expect.fail('dischargeResult never appeared'));",
+                  "    return;",
+                  "  }",
+                  "  pm.environment.set('pollCount', tries);",
+                  "  pm.execution.setNextRequest('02.10 Verify vitals alert loop');",
+                  "  return;",
+                  "}",
+                  "pm.environment.unset('pollCount');",
+                  "",
+                  "pm.test('Vitals breached on first pass', () => pm.expect(byName.vitalsTrend).to.eql('\"DETERIORATING\"'));",
+                  "pm.test('VitalsAlert was correlated', () => pm.expect(byName.vitalsAlertRaised).to.eql('true'));",
+                  "pm.test('Alert sub-process handled it', () => pm.expect(byName.alertMessage).to.include('threshold breached'));",
+                  "",
+                  "const discharge = JSON.parse(byName.dischargeResult);",
+                  "pm.test('Discharge gate closed', () => pm.expect(discharge.dischargeReady).to.be.false);",
+                  "console.log('Discharge blocked: ' + discharge.dischargeReason);",
+                  "",
+                  "// KNOWN DEFECT: the IdempotencyGuard suppresses every later vitals pass for",
+                  "// this caseId, so vitalsTrend can never leave DETERIORATING and this loop",
+                  "// never converges. 02.11 routes past it so the archive stage is still covered.",
+                  "console.warn('Vitals loop cannot converge — see collection description');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" },\n  \"page\": { \"limit\": 100 }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/variables/search", "host": ["{{baseUrl}}"], "path": ["variables", "search"] },
+            "description": "Proves worker-to-process message correlation: VitalsMonitorWorker publishes `VitalsAlert` correlated on `caseId`, the non-interrupting message start event catches it, and VitalsAlertHandlerWorker writes `alertMessage`."
+          }
+        },
+        {
+          "name": "02.11 Force discharge route",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Workaround for the non-converging vitals loop. Terminates whichever",
+                  "// task the loop is parked on and jumps straight to discharge sign-off,",
+                  "// which also skips the second AI connector task.",
+                  "const findParked = (attempt) => {",
+                  "  pm.sendRequest({",
+                  "    url: pm.variables.replaceIn('{{baseUrl}}/element-instances/search'),",
+                  "    method: 'POST',",
+                  "    header: {",
+                  "      'Content-Type': 'application/json',",
+                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
+                  "    },",
+                  "    body: {",
+                  "      mode: 'raw',",
+                  "      raw: JSON.stringify({",
+                  "        filter: {",
+                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
+                  "          elementId: 'Task_TreatmentPlan',",
+                  "          state: 'ACTIVE'",
+                  "        }",
+                  "      })",
+                  "    }",
+                  "  }, (err, res) => {",
+                  "    const items = (err || !res) ? [] : (res.json().items || []);",
+                  "    if (items.length) {",
+                  "      pm.environment.set('parkedElementInstanceKey', items[0].elementInstanceKey);",
+                  "    } else if (attempt < 20) {",
+                  "      findParked(attempt + 1);",
+                  "    } else {",
+                  "      console.error('No parked Task_TreatmentPlan found');",
+                  "    }",
+                  "  });",
+                  "};",
+                  "findParked(0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "console.log('Jumped to Task_DischargeSignoff');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"activateInstructions\": [\n    {\n      \"elementId\": \"Task_DischargeSignoff\",\n      \"variableInstructions\": [\n        {\n          \"variables\": {\n            \"dischargeSummary\": \"Admitted with chest pain. ACS ruled out. Treated with DAPT and statin. Discharged with cardiology follow-up in 2 weeks.\"\n          }\n        }\n      ]\n    }\n  ],\n  \"terminateInstructions\": [\n    { \"elementInstanceKey\": \"{{parkedElementInstanceKey}}\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/process-instances/{{processInstanceKey}}/modification",
+              "host": ["{{baseUrl}}"],
+              "path": ["process-instances", "{{processInstanceKey}}", "modification"]
+            },
+            "description": "Delete this request once the idempotency defect is fixed — the loop should then converge on its own and reach discharge without intervention."
+          }
+        },
+        {
+          "name": "02.12 Complete Discharge Sign-off",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const poll = (attempt) => {",
+                  "  pm.sendRequest({",
+                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
+                  "    method: 'POST',",
+                  "    header: {",
+                  "      'Content-Type': 'application/json',",
+                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
+                  "    },",
+                  "    body: {",
+                  "      mode: 'raw',",
+                  "      raw: JSON.stringify({",
+                  "        filter: {",
+                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
+                  "          elementId: 'Task_DischargeSignoff',",
+                  "          state: 'CREATED'",
+                  "        }",
+                  "      })",
+                  "    }",
+                  "  }, (err, res) => {",
+                  "    const items = (err || !res) ? [] : (res.json().items || []);",
+                  "    if (items.length) {",
+                  "      pm.environment.set('userTaskKey', items[0].userTaskKey);",
+                  "    } else if (attempt < 20) {",
+                  "      poll(attempt + 1);",
+                  "    } else {",
+                  "      console.error('Task_DischargeSignoff never appeared');",
+                  "    }",
+                  "  });",
+                  "};",
+                  "poll(0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "console.log('record-archiving worker runs next — verify with 02.13');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"physicianNotes\": \"Stable at discharge. No further chest pain.\",\n    \"followUpDate\": \"2026-08-12\",\n    \"familyBriefed\": true,\n    \"dischargeDecision\": \"DISCHARGE_HOME\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "host": ["{{baseUrl}}"],
+              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+            },
+            "description": "Candidate group `attending-physician`."
+          }
+        },
+        {
+          "name": "02.13 Verify instance completed",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "",
+                  "if (body.state !== 'COMPLETED') {",
+                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  if (tries > 20) {",
+                  "    pm.environment.unset('pollCount');",
+                  "    pm.test('Instance completed', () => pm.expect.fail('Still ' + body.state + ' after 20 polls'));",
+                  "    return;",
+                  "  }",
+                  "  pm.environment.set('pollCount', tries);",
+                  "  pm.execution.setNextRequest('02.13 Verify instance completed');",
+                  "  return;",
+                  "}",
+                  "pm.environment.unset('pollCount');",
+                  "",
+                  "pm.test('Instance COMPLETED', () => pm.expect(body.state).to.eql('COMPLETED'));",
+                  "console.log('Journey finished. Verify the archive row with:');",
+                  "console.log(\"SELECT case_id, patient_name, care_plan, vitals_trend, archived_at FROM patient_case WHERE case_id = '\" + pm.environment.get('caseId') + \"';\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/process-instances/{{processInstanceKey}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["process-instances", "{{processInstanceKey}}"]
+            },
+            "description": "RecordArchiveWorker writes one `patient_case` row keyed on caseId. Postman cannot query PostgreSQL, so the SQL to confirm it is logged to the console."
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 Exception path",
+      "item": [
+        {
+          "name": "03.1 Start with diagnostics down",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.environment.set('errCaseId', 'CASE-ERR-' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.environment.set('errProcessInstanceKey', body.processInstanceKey);",
+                  "console.log('Exception instance ' + body.processInstanceKey);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"processDefinitionId\": \"healthcare-treatment-journey\",\n  \"variables\": {\n    \"caseId\": \"{{errCaseId}}\",\n    \"patientId\": \"PAT-2002\",\n    \"patientName\": \"Ravi Kumar\",\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"MODERATE\",\n    \"diagnosticSystemDown\": true\n  }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/process-instances", "host": ["{{baseUrl}}"], "path": ["process-instances"] },
+            "description": "`diagnosticSystemDown` makes LabTestOrderWorker raise the BPMN error DIAGNOSTIC_SYSTEM_UNAVAILABLE instead of returning an order."
+          }
+        },
+        {
+          "name": "03.2 Complete Registration",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const poll = (attempt) => {",
+                  "  pm.sendRequest({",
+                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
+                  "    method: 'POST',",
+                  "    header: {",
+                  "      'Content-Type': 'application/json',",
+                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
+                  "    },",
+                  "    body: {",
+                  "      mode: 'raw',",
+                  "      raw: JSON.stringify({",
+                  "        filter: {",
+                  "          processInstanceKey: pm.environment.get('errProcessInstanceKey'),",
+                  "          elementId: 'Task_Registration',",
+                  "          state: 'CREATED'",
+                  "        }",
+                  "      })",
+                  "    }",
+                  "  }, (err, res) => {",
+                  "    const items = (err || !res) ? [] : (res.json().items || []);",
+                  "    if (items.length) {",
+                  "      pm.environment.set('errUserTaskKey', items[0].userTaskKey);",
+                  "    } else if (attempt < 20) {",
+                  "      poll(attempt + 1);",
+                  "    }",
+                  "  });",
+                  "};",
+                  "poll(0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('204 No Content', () => pm.response.to.have.status(204));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"consentObtained\": true,\n    \"allergiesNotes\": \"Penicillin allergy\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user-tasks/{{errUserTaskKey}}/completion",
+              "host": ["{{baseUrl}}"],
+              "path": ["user-tasks", "{{errUserTaskKey}}", "completion"]
+            }
+          }
+        },
+        {
+          "name": "03.3 Skip AI history summary",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const poll = (attempt) => {",
+                  "  pm.sendRequest({",
+                  "    url: pm.variables.replaceIn('{{baseUrl}}/element-instances/search'),",
+                  "    method: 'POST',",
+                  "    header: {",
+                  "      'Content-Type': 'application/json',",
+                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
+                  "    },",
+                  "    body: {",
+                  "      mode: 'raw',",
+                  "      raw: JSON.stringify({",
+                  "        filter: {",
+                  "          processInstanceKey: pm.environment.get('errProcessInstanceKey'),",
+                  "          elementId: 'Task_HistorySummary',",
+                  "          state: 'ACTIVE'",
+                  "        }",
+                  "      })",
+                  "    }",
+                  "  }, (err, res) => {",
+                  "    const items = (err || !res) ? [] : (res.json().items || []);",
+                  "    if (items.length) {",
+                  "      pm.environment.set('errAiElementInstanceKey', items[0].elementInstanceKey);",
+                  "    } else if (attempt < 20) {",
+                  "      poll(attempt + 1);",
+                  "    }",
+                  "  });",
+                  "};",
+                  "poll(0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('204 No Content', () => pm.response.to.have.status(204));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"activateInstructions\": [\n    {\n      \"elementId\": \"Task_Triage\",\n      \"variableInstructions\": [\n        { \"variables\": { \"historySummary\": \"58M, smoker, chest discomfort on exertion.\" } }\n      ]\n    }\n  ],\n  \"terminateInstructions\": [\n    { \"elementInstanceKey\": \"{{errAiElementInstanceKey}}\" }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/process-instances/{{errProcessInstanceKey}}/modification",
+              "host": ["{{baseUrl}}"],
+              "path": ["process-instances", "{{errProcessInstanceKey}}", "modification"]
+            }
+          }
+        },
+        {
+          "name": "03.4 Verify escalation task raised",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const items = pm.response.json().items || [];",
+                  "const escalation = items.find(t => t.elementId === 'Task_EscalatePhysician');",
+                  "",
+                  "if (!escalation) {",
+                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  if (tries > 25) {",
+                  "    pm.environment.unset('pollCount');",
+                  "    pm.test('Escalation raised', () => pm.expect.fail('Task_EscalatePhysician never appeared'));",
+                  "    return;",
+                  "  }",
+                  "  pm.environment.set('pollCount', tries);",
+                  "  pm.execution.setNextRequest('03.4 Verify escalation task raised');",
+                  "  return;",
+                  "}",
+                  "pm.environment.unset('pollCount');",
+                  "",
+                  "pm.test('Boundary error routed to escalation', () => pm.expect(escalation.state).to.eql('CREATED'));",
+                  "pm.environment.set('errUserTaskKey', escalation.userTaskKey);",
+                  "console.log('DIAGNOSTIC_SYSTEM_UNAVAILABLE handled — escalation task ' + escalation.userTaskKey);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": {\n    \"processInstanceKey\": \"{{errProcessInstanceKey}}\",\n    \"state\": \"CREATED\"\n  }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/user-tasks/search", "host": ["{{baseUrl}}"], "path": ["user-tasks", "search"] },
+            "description": "The whole point of this folder: the worker throws a BPMN error, the boundary error event on the diagnostics sub-process catches it, and Escalate to Physician appears for `attending-physician`."
+          }
+        },
+        {
+          "name": "03.5 Cancel exception instance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "console.log('Exception instance cancelled — cleanup done');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": {
+              "raw": "{{baseUrl}}/process-instances/{{errProcessInstanceKey}}/cancellation",
+              "host": ["{{baseUrl}}"],
+              "path": ["process-instances", "{{errProcessInstanceKey}}", "cancellation"]
+            },
+            "description": "The escalation branch ends at ErrEnd_1 once completed. Cancelling instead keeps the cluster tidy when re-running the collection."
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 Scenario variants",
+      "item": [
+        {
+          "name": "Triage — CRITICAL (4 diagnostics)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const out = pm.response.json().output;",
+                  "const parsed = typeof out === 'string' ? JSON.parse(out) : out;",
+                  "pm.test('rule_01 matched', () => pm.expect(pm.response.json().evaluatedDecisions[0].matchedRules[0].ruleId).to.eql('rule_01'));",
+                  "pm.test('CARDIAC_CRITICAL pathway', () => pm.expect(parsed.carePlan).to.eql('CARDIAC_CRITICAL'));",
+                  "pm.test('Four diagnostics fan out', () => pm.expect(parsed.diagnosticTests).to.have.lengthOf(4));",
+                  "pm.test('P1 priority', () => pm.expect(parsed.priority).to.eql('P1'));",
+                  "pm.test('CCU ward', () => pm.expect(parsed.assignedWard).to.eql('CCU'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decisionDefinitionId\": \"triage-care-pathway\",\n  \"variables\": {\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"CRITICAL\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/decision-definitions/evaluation",
+              "host": ["{{baseUrl}}"],
+              "path": ["decision-definitions", "evaluation"]
+            },
+            "description": "Evaluates the DMN directly, without starting a process. rule_01 → ECG, ECHO, TROPONIN, CARDIOLOGY_WORKUP."
+          }
+        },
+        {
+          "name": "Triage — RESPIRATORY / ICU",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const out = pm.response.json().output;",
+                  "const parsed = typeof out === 'string' ? JSON.parse(out) : out;",
+                  "pm.test('RESPIRATORY_CARE pathway', () => pm.expect(parsed.carePlan).to.eql('RESPIRATORY_CARE'));",
+                  "pm.test('ICU ward', () => pm.expect(parsed.assignedWard).to.eql('ICU'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decisionDefinitionId\": \"triage-care-pathway\",\n  \"variables\": {\n    \"admissionType\": \"WALK_IN\",\n    \"chiefComplaint\": \"RESPIRATORY\",\n    \"vitalsSeverity\": \"CRITICAL\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/decision-definitions/evaluation",
+              "host": ["{{baseUrl}}"],
+              "path": ["decision-definitions", "evaluation"]
+            },
+            "description": "rule_03 — admissionType is a blank (any) cell, so a walk-in still routes to respiratory care."
+          }
+        },
+        {
+          "name": "Triage — default GENERAL_CARE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const out = pm.response.json().output;",
+                  "const parsed = typeof out === 'string' ? JSON.parse(out) : out;",
+                  "pm.test('Falls through to GENERAL_CARE', () => pm.expect(parsed.carePlan).to.eql('GENERAL_CARE'));",
+                  "pm.test('P3 priority', () => pm.expect(parsed.priority).to.eql('P3'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decisionDefinitionId\": \"triage-care-pathway\",\n  \"variables\": {\n    \"admissionType\": \"WALK_IN\",\n    \"chiefComplaint\": \"ABDOMINAL_PAIN\",\n    \"vitalsSeverity\": \"LOW\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/decision-definitions/evaluation",
+              "host": ["{{baseUrl}}"],
+              "path": ["decision-definitions", "evaluation"]
+            },
+            "description": "rule_05 catch-all. Confirms hit policy FIRST leaves no input combination unmatched."
+          }
+        },
+        {
+          "name": "Discharge readiness — direct evaluation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const out = pm.response.json().output;",
+                  "const parsed = typeof out === 'string' ? JSON.parse(out) : out;",
+                  "console.log('dischargeReady=' + parsed.dischargeReady + ' reason=' + parsed.dischargeReason);",
+                  "pm.test('Returns a decision', () => pm.expect(parsed).to.have.property('dischargeReady'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decisionDefinitionId\": \"discharge-readiness\",\n  \"variables\": {\n    \"treatmentStepsCompleted\": true,\n    \"labResultsNormal\": true,\n    \"vitalsTrend\": \"STABLE\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/decision-definitions/evaluation",
+              "host": ["{{baseUrl}}"],
+              "path": ["decision-definitions", "evaluation"]
+            },
+            "description": "Vary `vitalsTrend` across STABLE / IMPROVING / DETERIORATING to exercise every row. Useful because the in-process path cannot currently reach STABLE — see the idempotency defect."
+          }
+        },
+        {
+          "name": "Publish VitalsAlert manually",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "console.log('Message key ' + body.messageKey);",
+                  "pm.test('Message accepted', () => pm.expect(body.messageKey).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"VitalsAlert\",\n  \"correlationKey\": \"{{caseId}}\",\n  \"timeToLive\": 600000,\n  \"variables\": {\n    \"alertMessage\": \"Manually injected vitals alert\",\n    \"vitalsTrend\": \"DETERIORATING\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/publication",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "publication"]
+            },
+            "description": "Correlates on `caseId` into the non-interrupting message start event of the vitals-alert event sub-process, independently of the worker. Run while the instance is inside the treatment sub-process."
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 Utilities",
+      "item": [
+        {
+          "name": "List active user tasks",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": {\n    \"processInstanceKey\": \"{{processInstanceKey}}\",\n    \"state\": \"CREATED\"\n  }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/user-tasks/search", "host": ["{{baseUrl}}"], "path": ["user-tasks", "search"] }
+          }
+        },
+        {
+          "name": "List all variables",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" },\n  \"page\": { \"limit\": 200 }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/variables/search", "host": ["{{baseUrl}}"], "path": ["variables", "search"] }
+          }
+        },
+        {
+          "name": "List active elements",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": {\n    \"processInstanceKey\": \"{{processInstanceKey}}\",\n    \"state\": \"ACTIVE\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/element-instances/search",
+              "host": ["{{baseUrl}}"],
+              "path": ["element-instances", "search"]
+            },
+            "description": "Shows exactly where the token is parked. The fastest way to diagnose a stuck instance."
+          }
+        },
+        {
+          "name": "List incidents",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/incidents/search", "host": ["{{baseUrl}}"], "path": ["incidents", "search"] }
+          }
+        },
+        {
+          "name": "Cancel instance",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": {
+              "raw": "{{baseUrl}}/process-instances/{{processInstanceKey}}/cancellation",
+              "host": ["{{baseUrl}}"],
+              "path": ["process-instances", "{{processInstanceKey}}", "cancellation"]
+            }
+          }
+        },
+        {
+          "name": "Local service health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('Database UP', () => pm.expect(body.components.db.status).to.eql('UP'));",
+                  "pm.test('Camunda client UP', () => pm.expect(body.components.camundaClient.status).to.eql('UP'));",
+                  "pm.test('Database is PostgreSQL', () => pm.expect(body.components.db.details.database).to.eql('PostgreSQL'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{localBaseUrl}}/actuator/health",
+              "host": ["{{localBaseUrl}}"],
+              "path": ["actuator", "health"]
+            },
+            "description": "Hits the Spring Boot app, not Camunda. Returns 503 overall whenever camundaClient is DOWN, which is the usual sign the CAMUNDA_* environment variables are missing."
+          }
+        }
+      ]
+    }
+  ]
+}
