@@ -1,77 +1,29 @@
 {
   "info": {
-    "_postman_id": "b7e41c92-6a3d-4f18-9c02-1d5f8e3a7b40",
-    "name": "Healthcare Treatment Journey — Camunda 8.9",
-    "description": "End-to-end driver for the inpatient admission-to-discharge process.\n\n## Setup\n\n1. Import `healthcare-treatment-journey.postman_environment.json` and select it.\n2. Fill in `clientId`, `clientSecret`, `clusterId`, `region` from Camunda Console.\n3. Run **00 Auth → Get access token** once. Every other request reuses the cached token and the collection pre-request script refreshes it automatically ~60s before expiry.\n\n## Running\n\nFolders are ordered. `Runner` works on folders 02 and 03 top to bottom, but the process is asynchronous: Camunda needs a moment between a completion and the next task appearing. Each polling request retries itself via `setNextRequest`, so the Runner handles this without manual delays.\n\n## Known blockers (verified 2026-07-29)\n\n- **AI tasks incident** without an `OPENAI_API_KEY` connector secret in Camunda Console. `02.5 Skip AI history summary` routes around this via process-instance modification.\n- **Vitals loop does not converge.** The framework IdempotencyGuard keys on job type + elementId + caseId, which are identical on every loop pass, so the second `vitals-monitoring` execution is treated as a replay and completed without running. `vitalsTrend` stays `DETERIORATING` and the discharge gate never opens. `02.9 Force discharge route` works around it.",
+    "_postman_id": "b7d41e92-5c38-4a71-9f26-2ad83c105f47",
+    "name": "Healthcare Treatment Journey — Service API",
+    "description": "Drives the inpatient admission-to-discharge journey through the healthcare-treatment-service REST API.\n\nThe service owns the Camunda credentials and talks to the cluster on your behalf, so nothing here needs an OAuth token or a cluster URL — only `baseUrl`.\n\n## Setup\n\n1. Import this collection and `healthcare-treatment-journey.postman_environment.json`.\n2. Select the **Healthcare Treatment Journey — Local** environment.\n3. Start the service (see the project README). Confirm with **00 Health → Service health**.\n\n## Running\n\nFolders 01 and 02 are ordered and work top to bottom in the Collection Runner.\n\nZeebe is eventually consistent — a task does not appear the instant the previous one completes. Every `Await …` request re-invokes itself via `setNextRequest` until the expected element shows up, capped by `pollCount`. **Set the Runner delay to 1000 ms** so polling does not spin.\n\n## The vitals loop\n\nFolder 01 drives the revise-plan loop for real: the patient breaches on the first observation, the discharge gate holds them back, the physician revises the plan, and the second observation clears them. No diversion is used to get through it.\n\nThat loop only converges because the vitals element folds the attempt counter into `businessKey` (`caseId + \"-vitals-\" + attempt`). The framework's `IdempotencyGuard` keys on `(businessKey, elementId)`, and both are otherwise identical on every pass — so without that mapping the second `vitals-monitoring` execution is misread as an at-least-once redelivery and completed without running, `vitalsTrend` stays `DETERIORATING`, and the journey loops forever.\n\n`01.13` and `01.18` assert the key of each pass, so losing that mapping fails the run loudly rather than hanging.\n\n## Known blocker (verified 2026-07-29)\n\n- **AI tasks incident.** `Task_HistorySummary` and `Task_DischargeSummary` need an `OPENAI_API_KEY` connector secret in Camunda Console. Without it they raise `ConnectorInputException`. Requests `01.5`, `01.20` and `02.4` step past them using the service's diversion endpoint. Delete those three once the secret exists.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
-  "auth": {
-    "type": "bearer",
-    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
-  },
   "event": [
-    {
-      "listen": "prerequisite",
-      "script": {
-        "type": "text/javascript",
-        "exec": [
-          "// Refresh the OAuth token when it is missing or within 60s of expiry.",
-          "// Skipped for the token request itself to avoid infinite recursion.",
-          "if (pm.info.requestName === 'Get access token') { return; }",
-          "",
-          "const expiresAt = Number(pm.environment.get('tokenExpiresAt') || 0);",
-          "const token = pm.environment.get('accessToken');",
-          "",
-          "if (token && Date.now() < expiresAt - 60000) { return; }",
-          "",
-          "pm.sendRequest({",
-          "  url: 'https://login.cloud.camunda.io/oauth/token',",
-          "  method: 'POST',",
-          "  header: { 'Content-Type': 'application/json' },",
-          "  body: {",
-          "    mode: 'raw',",
-          "    raw: JSON.stringify({",
-          "      grant_type: 'client_credentials',",
-          "      client_id: pm.environment.get('clientId'),",
-          "      client_secret: pm.environment.get('clientSecret'),",
-          "      audience: 'zeebe.camunda.io'",
-          "    })",
-          "  }",
-          "}, (err, res) => {",
-          "  if (err || res.code !== 200) {",
-          "    console.error('Token refresh failed', err || res.text());",
-          "    return;",
-          "  }",
-          "  const body = res.json();",
-          "  pm.environment.set('accessToken', body.access_token);",
-          "  pm.environment.set('tokenExpiresAt', Date.now() + body.expires_in * 1000);",
-          "  console.log('Token refreshed, expires in ' + body.expires_in + 's');",
-          "});"
-        ]
-      }
-    },
     {
       "listen": "test",
       "script": {
         "type": "text/javascript",
         "exec": [
-          "// Applies to every request: surface auth and server faults immediately",
-          "// rather than letting a later assertion fail for an unrelated reason.",
-          "pm.test('Not unauthorised', () => pm.expect(pm.response.code).to.not.be.oneOf([401, 403]));",
+          "// Applies to every request: surface transport and server faults immediately rather than",
+          "// letting a later assertion fail for an unrelated reason.",
           "pm.test('No server error', () => pm.expect(pm.response.code).to.be.below(500));"
         ]
       }
     }
   ],
-  "variable": [
-    { "key": "baseUrl", "value": "https://{{region}}.zeebe.camunda.io/{{clusterId}}/v2" }
-  ],
   "item": [
     {
-      "name": "00 Auth",
+      "name": "00 Health",
       "item": [
         {
-          "name": "Get access token",
+          "name": "Service health",
           "event": [
             {
               "listen": "test",
@@ -79,48 +31,11 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "",
-                  "const body = pm.response.json();",
-                  "pm.test('access_token present', () => pm.expect(body.access_token).to.be.a('string').and.not.empty);",
-                  "",
-                  "pm.environment.set('accessToken', body.access_token);",
-                  "pm.environment.set('tokenExpiresAt', Date.now() + body.expires_in * 1000);",
-                  "console.log('Token valid for ' + body.expires_in + 's');"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "auth": { "type": "noauth" },
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"grant_type\": \"client_credentials\",\n  \"client_id\": \"{{clientId}}\",\n  \"client_secret\": \"{{clientSecret}}\",\n  \"audience\": \"zeebe.camunda.io\"\n}"
-            },
-            "url": {
-              "raw": "https://login.cloud.camunda.io/oauth/token",
-              "protocol": "https",
-              "host": ["login", "cloud", "camunda", "io"],
-              "path": ["oauth", "token"]
-            },
-            "description": "Client-credentials grant against Camunda SaaS. Caches the token and its expiry in the environment; the collection pre-request script refreshes it automatically."
-          }
-        },
-        {
-          "name": "Check cluster topology",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "",
-                  "const body = pm.response.json();",
-                  "pm.test('Gateway is 8.9.x', () => pm.expect(body.gatewayVersion).to.match(/^8\\.9\\./));",
-                  "pm.test('Brokers reachable', () => pm.expect(body.brokers.length).to.be.above(0));",
-                  "console.log('Cluster ' + body.gatewayVersion + ', ' + body.brokers.length + ' broker(s)');"
+                  "const b = pm.response.json();",
+                  "pm.test('overall UP', () => pm.expect(b.status).to.eql('UP'));",
+                  "pm.test('database UP', () => pm.expect(b.components.db.status).to.eql('UP'));",
+                  "pm.test('camunda client UP', () => pm.expect(b.components.camundaClient.status).to.eql('UP'));",
+                  "console.log('DB: ' + b.components.db.details.database);"
                 ]
               }
             }
@@ -128,171 +43,117 @@
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{baseUrl}}/topology", "host": ["{{baseUrl}}"], "path": ["topology"] },
-            "description": "Confirms credentials, cluster id and region are all correct before anything else runs."
-          }
-        }
-      ]
-    },
-    {
-      "name": "01 Deploy",
-      "item": [
-        {
-          "name": "Deploy BPMN + DMN + forms",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "",
-                  "const body = pm.response.json();",
-                  "pm.test('deploymentKey returned', () => pm.expect(body.deploymentKey).to.be.a('string'));",
-                  "",
-                  "const kinds = { process: 0, decision: 0, form: 0 };",
-                  "(body.deployments || []).forEach(d => {",
-                  "  if (d.processDefinition) {",
-                  "    kinds.process++;",
-                  "    pm.environment.set('processDefinitionKey', d.processDefinition.processDefinitionKey);",
-                  "  }",
-                  "  if (d.decisionDefinition) { kinds.decision++; }",
-                  "  if (d.form) { kinds.form++; }",
-                  "});",
-                  "",
-                  "pm.test('1 process deployed', () => pm.expect(kinds.process).to.eql(1));",
-                  "pm.test('2 decisions deployed', () => pm.expect(kinds.decision).to.eql(2));",
-                  "pm.test('8 forms deployed', () => pm.expect(kinds.form).to.eql(8));",
-                  "console.log('Deployed', JSON.stringify(kinds));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [],
-            "body": {
-              "mode": "formdata",
-              "formdata": [
-                { "key": "resources", "type": "file", "src": [], "description": "processes/bpmn/healthcare-treatment-journey.bpmn" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/dmn/triage-care-pathway.dmn" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/dmn/discharge-readiness.dmn" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/registration-form.form" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/cardiology-workup-form.form" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/treatment-plan-form.form" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/specialist-consult-form.form" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/treatment-admin-form.form" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/discharge-form.form" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/physician-escalation-form.form" },
-                { "key": "resources", "type": "file", "src": [], "description": "processes/forms/clinical-director-form.form" }
-              ]
+            "url": {
+              "raw": "{{localBaseUrl}}/actuator/health",
+              "host": ["{{localBaseUrl}}"],
+              "path": ["actuator", "health"]
             },
-            "url": { "raw": "{{baseUrl}}/deployments", "host": ["{{baseUrl}}"], "path": ["deployments"] },
-            "description": "Postman cannot store file paths in an exported collection, so each `resources` row has an empty file picker. Select the file named in its Description column, under `src/main/resources/processes/`.\n\nDeploy all 11 together — the BPMN references forms and decisions by id, so a partial deployment leaves dangling references."
+            "description": "Confirms the service is up and that both its outbound dependencies — PostgreSQL and the Camunda cluster — are reachable. Run this first; every other request depends on both."
           }
         }
       ]
     },
     {
-      "name": "02 Happy path",
+      "name": "01 Happy path",
       "item": [
         {
-          "name": "02.1 Start instance",
+          "name": "01.1 Admit patient",
           "event": [
             {
               "listen": "prerequest",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "// Unique caseId per run: it is both the message correlation key and the",
-                  "// archive primary key, so reusing one collides on the second run.",
-                  "pm.environment.set('caseId', 'CASE-' + Date.now());"
+                  "// A fresh business key each run keeps the archive's unique constraint on case_id happy.",
+                  "pm.environment.set('caseId', 'CASE-PM-' + Date.now());",
+                  "pm.environment.set('pollCount', 0);"
                 ]
               }
             },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('instance key returned', () => pm.expect(b.processInstanceKey).to.be.a('number'));",
+                  "pm.test('caseId echoed', () => pm.expect(b.caseId).to.eql(pm.environment.get('caseId')));",
+                  "pm.environment.set('processInstanceKey', b.processInstanceKey);",
+                  "console.log('Started ' + b.caseId + ' as instance ' + b.processInstanceKey + ' on definition v' + b.version);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"caseId\": \"{{caseId}}\",\n  \"variables\": {\n    \"patientId\": \"PAT-1001\",\n    \"patientName\": \"Asha Verma\",\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"MODERATE\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cases",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases"]
+            },
+            "description": "Starts the journey. Omit `caseId` and the service generates one.\n\nNote `vitalsSeverity`: the triage table recognises only CRITICAL and MODERATE for chest pain. Any other value — including a typo — falls through to the catch-all rule and yields GENERAL_CARE / P3 rather than a cardiac pathway."
+          }
+        },
+        {
+          "name": "01.2 Await Registration",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const want = 'Task_Registration';",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === want);",
+                  "",
+                  "if (hit) {",
+                  "  pm.environment.set('userTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test(want + ' is waiting', () => pm.expect(hit.name).to.be.a('string'));",
+                  "  console.log('Waiting at: ' + hit.name);",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 25) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for ' + want, () => pm.expect.fail('Gave up after 25 polls'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks"]
+            },
+            "description": "Polls until the Registration task appears. Re-invokes itself rather than relying on a fixed delay, because the engine indexes asynchronously."
+          }
+        },
+        {
+          "name": "01.3 Complete Registration",
+          "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "",
-                  "const body = pm.response.json();",
-                  "pm.test('processInstanceKey returned', () => pm.expect(body.processInstanceKey).to.be.a('string'));",
-                  "pm.test('Correct process', () => pm.expect(body.processDefinitionId).to.eql('healthcare-treatment-journey'));",
-                  "",
-                  "pm.environment.set('processInstanceKey', body.processInstanceKey);",
-                  "console.log('Instance ' + body.processInstanceKey + ' for ' + pm.environment.get('caseId'));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"processDefinitionId\": \"healthcare-treatment-journey\",\n  \"variables\": {\n    \"caseId\": \"{{caseId}}\",\n    \"patientId\": \"PAT-1001\",\n    \"patientName\": \"Asha Verma\",\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"MODERATE\"\n  }\n}"
-            },
-            "url": { "raw": "{{baseUrl}}/process-instances", "host": ["{{baseUrl}}"], "path": ["process-instances"] },
-            "description": "ER / CHEST_PAIN / MODERATE matches triage rule_02, so the decision returns [\"ECG\",\"CARDIOLOGY_WORKUP\"] and the diagnostics sub-process fans out to two parallel branches."
-          }
-        },
-        {
-          "name": "02.2 Await Registration task",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// Zeebe is eventually consistent; poll until the task is exported to the",
-                  "// secondary storage that backs the search API.",
-                  "const body = pm.response.json();",
-                  "const task = (body.items || []).find(t => t.elementId === 'Task_Registration');",
-                  "",
-                  "if (!task) {",
-                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  if (tries > 15) {",
-                  "    pm.environment.unset('pollCount');",
-                  "    pm.test('Registration task appeared', () => pm.expect.fail('Not found after 15 polls'));",
-                  "    return;",
-                  "  }",
-                  "  pm.environment.set('pollCount', tries);",
-                  "  console.log('Waiting for Task_Registration, attempt ' + tries);",
-                  "  setTimeout(() => {}, 2000);",
-                  "  pm.execution.setNextRequest('02.2 Await Registration task');",
-                  "  return;",
-                  "}",
-                  "",
-                  "pm.environment.unset('pollCount');",
-                  "pm.environment.set('userTaskKey', task.userTaskKey);",
-                  "pm.test('Registration task created', () => pm.expect(task.state).to.eql('CREATED'));",
-                  "console.log('Task_Registration key ' + task.userTaskKey);"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filter\": {\n    \"processInstanceKey\": \"{{processInstanceKey}}\",\n    \"state\": \"CREATED\"\n  },\n  \"sort\": [{ \"field\": \"creationDate\", \"order\": \"ASC\" }]\n}"
-            },
-            "url": { "raw": "{{baseUrl}}/user-tasks/search", "host": ["{{baseUrl}}"], "path": ["user-tasks", "search"] }
-          }
-        },
-        {
-          "name": "02.3 Complete Registration",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "console.log('Registration completed — AI history summary runs next');"
+                  "const b = pm.response.json();",
+                  "pm.test('completed the right element', () => pm.expect(b.elementId).to.eql('Task_Registration'));",
+                  "pm.environment.set('pollCount', 0);"
                 ]
               }
             }
@@ -305,100 +166,63 @@
               "raw": "{\n  \"variables\": {\n    \"consentObtained\": true,\n    \"allergiesNotes\": \"No known drug allergies\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks/Task_Registration/completion",
               "host": ["{{baseUrl}}"],
-              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+              "path": ["cases", "{{processInstanceKey}}", "tasks", "Task_Registration", "completion"]
             },
-            "description": "Candidate group `registration-desk`. Completing this releases the token to Task_HistorySummary, which incidents unless the OPENAI_API_KEY connector secret exists."
+            "description": "Completes a task by BPMN element id — the service resolves the engine key. Use `/tasks/{taskKey}/completion` in 03 Utilities if you already hold a key."
           }
         },
         {
-          "name": "02.4 Check AI incident",
+          "name": "01.4 Await AI incident",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "const items = pm.response.json().items || [];",
-                  "const ai = items.find(i => i.elementId === 'Task_HistorySummary');",
+                  "const incidents = pm.response.json();",
+                  "const hit = incidents.find(i => i.elementId === 'Task_HistorySummary');",
                   "",
-                  "if (!ai) {",
-                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  if (tries > 12) {",
-                  "    pm.environment.unset('pollCount');",
-                  "    console.log('No AI incident — OPENAI_API_KEY appears to be configured. Skip 02.5.');",
-                  "    return;",
+                  "if (hit) {",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('AI connector incident raised as documented', () => pm.expect(hit.errorMessage).to.include('OPENAI_API_KEY'));",
+                  "  console.log('Expected blocker reached: ' + hit.errorMessage.split('|')[0].trim());",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 25) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    console.log('No AI incident — the OPENAI_API_KEY secret may now be configured. Skip 01.5 if so.');",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
                   "  }",
-                  "  pm.environment.set('pollCount', tries);",
-                  "  pm.execution.setNextRequest('02.4 Check AI incident');",
-                  "  return;",
-                  "}",
-                  "",
-                  "pm.environment.unset('pollCount');",
-                  "pm.test('Incident is the missing OpenAI secret', () => pm.expect(ai.errorMessage).to.include('OPENAI_API_KEY'));",
-                  "console.log('Expected incident present — 02.5 will route around it');"
+                  "}"
                 ]
               }
             }
           ],
           "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" }\n}"
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/incidents",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "incidents"]
             },
-            "url": { "raw": "{{baseUrl}}/incidents/search", "host": ["{{baseUrl}}"], "path": ["incidents", "search"] },
-            "description": "Asserts the documented failure mode rather than hiding it. If you have configured the connector secret this request finds nothing and the run continues normally."
+            "description": "The AI history-summary task fails without an `OPENAI_API_KEY` connector secret. This request confirms the blocker rather than hiding it. If the secret is configured in your cluster, this poll finds nothing and 01.5 becomes unnecessary."
           }
         },
         {
-          "name": "02.5 Skip AI history summary",
+          "name": "01.5 Divert past AI summary",
           "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// Resolve the element instance to terminate. Modification needs the",
-                  "// elementInstanceKey, which is not the same as the incident key.",
-                  "pm.sendRequest({",
-                  "  url: pm.variables.replaceIn('{{baseUrl}}/element-instances/search'),",
-                  "  method: 'POST',",
-                  "  header: {",
-                  "    'Content-Type': 'application/json',",
-                  "    'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
-                  "  },",
-                  "  body: {",
-                  "    mode: 'raw',",
-                  "    raw: JSON.stringify({",
-                  "      filter: {",
-                  "        processInstanceKey: pm.environment.get('processInstanceKey'),",
-                  "        elementId: 'Task_HistorySummary',",
-                  "        state: 'ACTIVE'",
-                  "      }",
-                  "    })",
-                  "  }",
-                  "}, (err, res) => {",
-                  "  if (err) { console.error(err); return; }",
-                  "  const items = res.json().items || [];",
-                  "  if (items.length) {",
-                  "    pm.environment.set('aiElementInstanceKey', items[0].elementInstanceKey);",
-                  "  } else {",
-                  "    console.log('Task_HistorySummary not active — nothing to skip');",
-                  "  }",
-                  "});"
-                ]
-              }
-            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "console.log('Token moved to Task_Triage with a stubbed historySummary');"
+                  "pm.environment.set('pollCount', 0);"
                 ]
               }
             }
@@ -408,114 +232,102 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"activateInstructions\": [\n    {\n      \"elementId\": \"Task_Triage\",\n      \"variableInstructions\": [\n        {\n          \"variables\": {\n            \"historySummary\": \"65F, hypertension and T2DM. Central chest pain radiating to left arm, onset 2h. Prior MI 2019.\"\n          }\n        }\n      ]\n    }\n  ],\n  \"terminateInstructions\": [\n    { \"elementInstanceKey\": \"{{aiElementInstanceKey}}\" }\n  ]\n}"
+              "raw": "{\n  \"fromElementId\": \"Task_HistorySummary\",\n  \"toElementId\": \"Task_Triage\",\n  \"variables\": {\n    \"historySummary\": \"65F, hypertension and T2DM. Central chest pain radiating to left arm, onset 2h. Prior MI 2019.\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/process-instances/{{processInstanceKey}}/modification",
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/diversion",
               "host": ["{{baseUrl}}"],
-              "path": ["process-instances", "{{processInstanceKey}}", "modification"]
+              "path": ["cases", "{{processInstanceKey}}", "diversion"]
             },
-            "description": "Process-instance modification: terminate the incidented AI connector task and activate Task_Triage with a stubbed summary. Standard technique for testing around an unconfigured connector.\n\nSkip this request entirely once OPENAI_API_KEY is set in Camunda Console."
+            "description": "Terminates the blocked AI task and activates triage in one atomic modification, seeding the summary the AI step would have produced.\n\nVariables here are set at process scope, so later steps in other scopes — the archive worker among them — can read them.\n\nDelete this request once the connector secret exists."
           }
         },
         {
-          "name": "02.6 Verify triage decision",
+          "name": "01.6 Await Cardiology Workup",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "const items = pm.response.json().items || [];",
-                  "const byName = {};",
-                  "items.forEach(v => { byName[v.name] = v.value; });",
+                  "const want = 'Task_CardiologyWorkup';",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === want);",
                   "",
-                  "if (!byName.carePlan) {",
-                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  if (tries > 15) {",
-                  "    pm.environment.unset('pollCount');",
-                  "    pm.test('Triage produced carePlan', () => pm.expect.fail('carePlan never appeared'));",
-                  "    return;",
+                  "if (hit) {",
+                  "  pm.environment.set('userTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test(want + ' is waiting', () => pm.expect(hit.name).to.be.a('string'));",
+                  "  console.log('Diagnostics fanned out; waiting at ' + hit.name);",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for ' + want, () => pm.expect.fail('Gave up after 30 polls'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
                   "  }",
-                  "  pm.environment.set('pollCount', tries);",
-                  "  pm.execution.setNextRequest('02.6 Verify triage decision');",
-                  "  return;",
-                  "}",
-                  "pm.environment.unset('pollCount');",
-                  "",
-                  "// rule_02: ER + CHEST_PAIN + MODERATE",
-                  "pm.test('carePlan is CARDIAC_STANDARD', () => pm.expect(byName.carePlan).to.eql('\"CARDIAC_STANDARD\"'));",
-                  "pm.test('priority is P2', () => pm.expect(byName.priority).to.eql('\"P2\"'));",
-                  "pm.test('ward is CCU', () => pm.expect(byName.assignedWard).to.eql('\"CCU\"'));",
-                  "pm.test('two diagnostic tests fan out', () => {",
-                  "  const tests = JSON.parse(byName.diagnosticTests);",
-                  "  pm.expect(tests).to.have.members(['ECG', 'CARDIOLOGY_WORKUP']);",
-                  "});"
+                  "}"
                 ]
               }
             }
           ],
           "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" },\n  \"page\": { \"limit\": 100 }\n}"
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks"]
             },
-            "url": { "raw": "{{baseUrl}}/variables/search", "host": ["{{baseUrl}}"], "path": ["variables", "search"] },
-            "description": "Asserts the triage DMN (hit policy FIRST) matched rule_02. Variable values come back JSON-encoded, hence the quoted comparisons."
+            "description": "Triage runs, then the diagnostics sub-process fans out one branch per ordered test. The ECG branch is fully automated by LabTestOrderWorker and LabResultIngestionWorker; only the cardiology workup needs a human."
           }
         },
         {
-          "name": "02.7 Complete Cardiology Workup",
+          "name": "01.7 Verify triage decision",
           "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// The ECG branch is fully automated (lab-test-ordering then",
-                  "// lab-result-ingestion). Only CARDIOLOGY_WORKUP needs a human.",
-                  "const poll = (attempt) => {",
-                  "  pm.sendRequest({",
-                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
-                  "    method: 'POST',",
-                  "    header: {",
-                  "      'Content-Type': 'application/json',",
-                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
-                  "    },",
-                  "    body: {",
-                  "      mode: 'raw',",
-                  "      raw: JSON.stringify({",
-                  "        filter: {",
-                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
-                  "          elementId: 'Task_CardiologyWorkup',",
-                  "          state: 'CREATED'",
-                  "        }",
-                  "      })",
-                  "    }",
-                  "  }, (err, res) => {",
-                  "    const items = (err || !res) ? [] : (res.json().items || []);",
-                  "    if (items.length) {",
-                  "      pm.environment.set('userTaskKey', items[0].userTaskKey);",
-                  "    } else if (attempt < 20) {",
-                  "      poll(attempt + 1);",
-                  "    } else {",
-                  "      console.error('Task_CardiologyWorkup never appeared');",
-                  "    }",
-                  "  });",
-                  "};",
-                  "poll(0);"
-                ]
-              }
-            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "console.log('Cardiology workup done — multi-instance join closes next');"
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const v = pm.response.json();",
+                  "",
+                  "pm.test('care plan is CARDIAC_STANDARD', () => pm.expect(v.carePlan).to.eql('CARDIAC_STANDARD'));",
+                  "pm.test('priority is P2', () => pm.expect(v.priority).to.eql('P2'));",
+                  "pm.test('assigned to CCU', () => pm.expect(v.assignedWard).to.eql('CCU'));",
+                  "pm.test('both diagnostics ordered', () => pm.expect(v.diagnosticTests).to.have.members(['ECG', 'CARDIOLOGY_WORKUP']));",
+                  "pm.test('lab order placed by worker', () => pm.expect(v.orderId).to.be.a('string').and.match(/^ORD-/));",
+                  "",
+                  "console.log('Triage -> ' + v.carePlan + ' / ' + v.priority + ' / ' + v.assignedWard);",
+                  "console.log('Lab order raised by LabTestOrderWorker: ' + v.orderId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/variables",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "variables"]
+            },
+            "description": "Confirms the triage DMN fired and that the lab workers ran. `orderId` is proof that this service's own Java code executed — the engine handed it a job and LabTestOrderWorker answered."
+          }
+        },
+        {
+          "name": "01.8 Complete Cardiology Workup",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('pollCount', 0);"
                 ]
               }
             }
@@ -528,60 +340,64 @@
               "raw": "{\n  \"variables\": {\n    \"testType\": \"CARDIOLOGY_WORKUP\",\n    \"ecgInterpretation\": \"Sinus rhythm, no acute ST changes\",\n    \"echoResult\": \"EF 55%, no regional wall motion abnormality\",\n    \"cardiacRiskLevel\": \"MODERATE\",\n    \"cardiologyNotes\": \"Serial troponins advised\",\n    \"resultsUploaded\": true\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks/Task_CardiologyWorkup/completion",
               "host": ["{{baseUrl}}"],
-              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+              "path": ["cases", "{{processInstanceKey}}", "tasks", "Task_CardiologyWorkup", "completion"]
             },
-            "description": "Candidate group `diagnostics-technician`."
+            "description": "Completing this closes the last open branch of the multi-instance diagnostics sub-process, so the join opens and the journey moves on to treatment planning."
           }
         },
         {
-          "name": "02.8 Complete Treatment Plan",
+          "name": "01.9 Await Treatment Plan",
           "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const poll = (attempt) => {",
-                  "  pm.sendRequest({",
-                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
-                  "    method: 'POST',",
-                  "    header: {",
-                  "      'Content-Type': 'application/json',",
-                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
-                  "    },",
-                  "    body: {",
-                  "      mode: 'raw',",
-                  "      raw: JSON.stringify({",
-                  "        filter: {",
-                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
-                  "          elementId: 'Task_TreatmentPlan',",
-                  "          state: 'CREATED'",
-                  "        }",
-                  "      })",
-                  "    }",
-                  "  }, (err, res) => {",
-                  "    const items = (err || !res) ? [] : (res.json().items || []);",
-                  "    if (items.length) {",
-                  "      pm.environment.set('userTaskKey', items[0].userTaskKey);",
-                  "    } else if (attempt < 20) {",
-                  "      poll(attempt + 1);",
-                  "    } else {",
-                  "      console.error('Task_TreatmentPlan never appeared');",
-                  "    }",
-                  "  });",
-                  "};",
-                  "poll(0);"
-                ]
-              }
-            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+                  "const want = 'Task_TreatmentPlan';",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === want);",
+                  "",
+                  "if (hit) {",
+                  "  pm.environment.set('userTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test(want + ' is waiting', () => pm.expect(hit.name).to.be.a('string'));",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for ' + want, () => pm.expect.fail('Gave up after 30 polls'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks"]
+            },
+            "description": "Waits for the diagnostics join to open and the treatment planning task to appear."
+          }
+        },
+        {
+          "name": "01.10 Complete Treatment Plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('pollCount', 0);"
                 ]
               }
             }
@@ -594,61 +410,64 @@
               "raw": "{\n  \"variables\": {\n    \"treatmentPlan\": \"Dual antiplatelet therapy, telemetry monitoring, serial troponins q6h\",\n    \"medications\": \"Aspirin 75mg OD, Atorvastatin 40mg OD, Ramipril 5mg OD\",\n    \"consultsRequired\": false\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks/Task_TreatmentPlan/completion",
               "host": ["{{baseUrl}}"],
-              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+              "path": ["cases", "{{processInstanceKey}}", "tasks", "Task_TreatmentPlan", "completion"]
             },
-            "description": "Candidate group `attending-physician`. Set `consultsRequired` to true to exercise the ad-hoc specialist consult stage instead — see folder 04."
+            "description": "`consultsRequired: false` routes past the ad-hoc consultations sub-process. Set it true to exercise that branch instead."
           }
         },
         {
-          "name": "02.9 Complete Treatment Administration",
+          "name": "01.11 Await Treatment Administration",
           "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const poll = (attempt) => {",
-                  "  pm.sendRequest({",
-                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
-                  "    method: 'POST',",
-                  "    header: {",
-                  "      'Content-Type': 'application/json',",
-                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
-                  "    },",
-                  "    body: {",
-                  "      mode: 'raw',",
-                  "      raw: JSON.stringify({",
-                  "        filter: {",
-                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
-                  "          elementId: 'Task_TreatmentAdmin',",
-                  "          state: 'CREATED'",
-                  "        }",
-                  "      })",
-                  "    }",
-                  "  }, (err, res) => {",
-                  "    const items = (err || !res) ? [] : (res.json().items || []);",
-                  "    if (items.length) {",
-                  "      pm.environment.set('userTaskKey', items[0].userTaskKey);",
-                  "    } else if (attempt < 20) {",
-                  "      poll(attempt + 1);",
-                  "    } else {",
-                  "      console.error('Task_TreatmentAdmin never appeared');",
-                  "    }",
-                  "  });",
-                  "};",
-                  "poll(0);"
-                ]
-              }
-            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "console.log('Vitals monitoring runs next — first pass deliberately breaches');"
+                  "const want = 'Task_TreatmentAdmin';",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === want);",
+                  "",
+                  "if (hit) {",
+                  "  pm.environment.set('userTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test(want + ' is waiting', () => pm.expect(hit.name).to.be.a('string'));",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for ' + want, () => pm.expect.fail('Gave up after 30 polls'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks"]
+            },
+            "description": "Waits for the treatment execution sub-process to open. The vitals-alert event sub-process lives inside this scope, so its message subscription is only active from here on."
+          }
+        },
+        {
+          "name": "01.12 Complete Treatment Administration",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('pollCount', 0);"
                 ]
               }
             }
@@ -661,116 +480,117 @@
               "raw": "{\n  \"variables\": {\n    \"medicationsAdministered\": true,\n    \"observationsRecorded\": true,\n    \"nursingNotes\": \"Patient stable, tolerated medication, no chest pain reported\",\n    \"treatmentStepsCompleted\": true,\n    \"labResultsNormal\": true\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks/Task_TreatmentAdmin/completion",
               "host": ["{{baseUrl}}"],
-              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+              "path": ["cases", "{{processInstanceKey}}", "tasks", "Task_TreatmentAdmin", "completion"]
             },
-            "description": "Candidate group `nurse`. Both `treatmentStepsCompleted` and `labResultsNormal` must be true — the discharge-readiness decision reads both."
+            "description": "Completing this triggers VitalsMonitorWorker, which breaches the thresholds on its first run, raises a VitalsAlert message into the event sub-process, and drives the discharge-readiness decision."
           }
         },
         {
-          "name": "02.10 Verify vitals alert loop",
+          "name": "01.13 Await first vitals check",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "const items = pm.response.json().items || [];",
-                  "const byName = {};",
-                  "items.forEach(v => { byName[v.name] = v.value; });",
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const v = pm.response.json();",
                   "",
-                  "if (!byName.dischargeResult) {",
-                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  if (tries > 20) {",
-                  "    pm.environment.unset('pollCount');",
-                  "    pm.test('Discharge decision evaluated', () => pm.expect.fail('dischargeResult never appeared'));",
-                  "    return;",
+                  "// VitalsMonitorWorker runs asynchronously after the treatment step completes, so",
+                  "// the trend is not there the instant this request fires.",
+                  "if (v.vitalsTrend === undefined) {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Vitals monitoring never ran', () => pm.expect.fail('vitalsTrend never appeared'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
                   "  }",
-                  "  pm.environment.set('pollCount', tries);",
-                  "  pm.execution.setNextRequest('02.10 Verify vitals alert loop');",
-                  "  return;",
-                  "}",
-                  "pm.environment.unset('pollCount');",
+                  "} else {",
+                  "  pm.environment.set('pollCount', 0);",
                   "",
-                  "pm.test('Vitals breached on first pass', () => pm.expect(byName.vitalsTrend).to.eql('\"DETERIORATING\"'));",
-                  "pm.test('VitalsAlert was correlated', () => pm.expect(byName.vitalsAlertRaised).to.eql('true'));",
-                  "pm.test('Alert sub-process handled it', () => pm.expect(byName.alertMessage).to.include('threshold breached'));",
+                  "  pm.test('first pass reports DETERIORATING', () => pm.expect(v.vitalsTrend).to.eql('DETERIORATING'));",
+                  "  pm.test('vitals alert was raised', () => pm.expect(v.vitalsAlertRaised).to.eql(true));",
+                  "  pm.test('alert handler ran', () => pm.expect(v.alertMessage).to.be.a('string'));",
                   "",
-                  "const discharge = JSON.parse(byName.dischargeResult);",
-                  "pm.test('Discharge gate closed', () => pm.expect(discharge.dischargeReady).to.be.false);",
-                  "console.log('Discharge blocked: ' + discharge.dischargeReason);",
+                  "  // The idempotency key is scoped per loop pass by an input mapping on the vitals",
+                  "  // element. Pass one runs with attempt 0; without that scoping every later pass",
+                  "  // would reuse this same key and be suppressed as a replay.",
+                  "  pm.test('idempotency key is scoped to this pass', () => pm.expect(v.businessKey).to.eql(pm.environment.get('caseId') + '-vitals-0'));",
                   "",
-                  "// KNOWN DEFECT: the IdempotencyGuard suppresses every later vitals pass for",
-                  "// this caseId, so vitalsTrend can never leave DETERIORATING and this loop",
-                  "// never converges. 02.11 routes past it so the archive stage is still covered.",
-                  "console.warn('Vitals loop cannot converge — see collection description');"
+                  "  console.log('Pass 1: trend=' + v.vitalsTrend + ' businessKey=' + v.businessKey + ' attempts=' + v.dischargeAttemptCount);",
+                  "  console.log('The discharge gate rejects, the counter increments, and the journey loops back to treatment planning.');",
+                  "}"
                 ]
               }
             }
           ],
           "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" },\n  \"page\": { \"limit\": 100 }\n}"
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/variables",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "variables"]
             },
-            "url": { "raw": "{{baseUrl}}/variables/search", "host": ["{{baseUrl}}"], "path": ["variables", "search"] },
-            "description": "Proves worker-to-process message correlation: VitalsMonitorWorker publishes `VitalsAlert` correlated on `caseId`, the non-interrupting message start event catches it, and VitalsAlertHandlerWorker writes `alertMessage`."
+            "description": "The patient breaches on the first observation, so the discharge gate holds them back and the journey loops round for a revised plan. That is the intended clinical path, not a fault."
           }
         },
         {
-          "name": "02.11 Force discharge route",
+          "name": "01.14 Await Treatment Plan (2nd pass)",
           "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// Workaround for the non-converging vitals loop. Terminates whichever",
-                  "// task the loop is parked on and jumps straight to discharge sign-off,",
-                  "// which also skips the second AI connector task.",
-                  "const findParked = (attempt) => {",
-                  "  pm.sendRequest({",
-                  "    url: pm.variables.replaceIn('{{baseUrl}}/element-instances/search'),",
-                  "    method: 'POST',",
-                  "    header: {",
-                  "      'Content-Type': 'application/json',",
-                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
-                  "    },",
-                  "    body: {",
-                  "      mode: 'raw',",
-                  "      raw: JSON.stringify({",
-                  "        filter: {",
-                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
-                  "          elementId: 'Task_TreatmentPlan',",
-                  "          state: 'ACTIVE'",
-                  "        }",
-                  "      })",
-                  "    }",
-                  "  }, (err, res) => {",
-                  "    const items = (err || !res) ? [] : (res.json().items || []);",
-                  "    if (items.length) {",
-                  "      pm.environment.set('parkedElementInstanceKey', items[0].elementInstanceKey);",
-                  "    } else if (attempt < 20) {",
-                  "      findParked(attempt + 1);",
-                  "    } else {",
-                  "      console.error('No parked Task_TreatmentPlan found');",
-                  "    }",
-                  "  });",
-                  "};",
-                  "findParked(0);"
-                ]
-              }
-            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "console.log('Jumped to Task_DischargeSignoff');"
+                  "const want = 'Task_TreatmentPlan';",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === want);",
+                  "",
+                  "if (hit) {",
+                  "  pm.environment.set('userTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('loop returned to treatment planning', () => pm.expect(hit.elementId).to.eql(want));",
+                  "  console.log('Loop closed — the physician is asked to revise the plan.');",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for ' + want, () => pm.expect.fail('Loop never came back round'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks"]
+            },
+            "description": "The gate rejected, so `Task_IncrementCounter` bumped `dischargeAttemptCount` and the journey routed back to treatment planning. Attempts above three would divert via clinical director review first."
+          }
+        },
+        {
+          "name": "01.15 Revise Treatment Plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('pollCount', 0);"
                 ]
               }
             }
@@ -780,64 +600,267 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"activateInstructions\": [\n    {\n      \"elementId\": \"Task_DischargeSignoff\",\n      \"variableInstructions\": [\n        {\n          \"variables\": {\n            \"dischargeSummary\": \"Admitted with chest pain. ACS ruled out. Treated with DAPT and statin. Discharged with cardiology follow-up in 2 weeks.\"\n          }\n        }\n      ]\n    }\n  ],\n  \"terminateInstructions\": [\n    { \"elementInstanceKey\": \"{{parkedElementInstanceKey}}\" }\n  ]\n}"
+              "raw": "{\n  \"variables\": {\n    \"treatmentPlan\": \"Revised: add rate control and supplemental oxygen, repeat observations in 4h\",\n    \"medications\": \"Aspirin 75mg OD, Atorvastatin 40mg OD, Ramipril 5mg OD, Bisoprolol 2.5mg OD\",\n    \"consultsRequired\": false\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/process-instances/{{processInstanceKey}}/modification",
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks/Task_TreatmentPlan/completion",
               "host": ["{{baseUrl}}"],
-              "path": ["process-instances", "{{processInstanceKey}}", "modification"]
+              "path": ["cases", "{{processInstanceKey}}", "tasks", "Task_TreatmentPlan", "completion"]
             },
-            "description": "Delete this request once the idempotency defect is fixed — the loop should then converge on its own and reach discharge without intervention."
+            "description": "The revised plan is what the patient responds to, which is what lets the loop terminate."
           }
         },
         {
-          "name": "02.12 Complete Discharge Sign-off",
+          "name": "01.16 Await Treatment Administration (2nd pass)",
           "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const poll = (attempt) => {",
-                  "  pm.sendRequest({",
-                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
-                  "    method: 'POST',",
-                  "    header: {",
-                  "      'Content-Type': 'application/json',",
-                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
-                  "    },",
-                  "    body: {",
-                  "      mode: 'raw',",
-                  "      raw: JSON.stringify({",
-                  "        filter: {",
-                  "          processInstanceKey: pm.environment.get('processInstanceKey'),",
-                  "          elementId: 'Task_DischargeSignoff',",
-                  "          state: 'CREATED'",
-                  "        }",
-                  "      })",
-                  "    }",
-                  "  }, (err, res) => {",
-                  "    const items = (err || !res) ? [] : (res.json().items || []);",
-                  "    if (items.length) {",
-                  "      pm.environment.set('userTaskKey', items[0].userTaskKey);",
-                  "    } else if (attempt < 20) {",
-                  "      poll(attempt + 1);",
-                  "    } else {",
-                  "      console.error('Task_DischargeSignoff never appeared');",
-                  "    }",
-                  "  });",
-                  "};",
-                  "poll(0);"
-                ]
-              }
-            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "console.log('record-archiving worker runs next — verify with 02.13');"
+                  "const want = 'Task_TreatmentAdmin';",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === want);",
+                  "",
+                  "if (hit) {",
+                  "  pm.environment.set('userTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test(want + ' is waiting', () => pm.expect(hit.name).to.be.a('string'));",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for ' + want, () => pm.expect.fail('Gave up after 30 polls'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks"]
+            },
+            "description": "Second entry into the treatment execution sub-process."
+          }
+        },
+        {
+          "name": "01.17 Administer revised treatment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('pollCount', 0);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"medicationsAdministered\": true,\n    \"observationsRecorded\": true,\n    \"nursingNotes\": \"Responded to revised plan. Saturations recovered, afebrile, rate controlled.\",\n    \"treatmentStepsCompleted\": true,\n    \"labResultsNormal\": true\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks/Task_TreatmentAdmin/completion",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks", "Task_TreatmentAdmin", "completion"]
+            },
+            "description": "Triggers the second vitals check. This is the pass that used to be silently skipped."
+          }
+        },
+        {
+          "name": "01.18 Verify the loop converged",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const v = pm.response.json();",
+                  "",
+                  "// Wait for the second vitals check to land. Its key is scoped to attempt 1, so it is",
+                  "// a distinct execution rather than a replay of attempt 0.",
+                  "const secondPassKey = pm.environment.get('caseId') + '-vitals-1';",
+                  "",
+                  "if (v.businessKey !== secondPassKey) {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Second vitals check never ran', () => pm.expect.fail('businessKey stuck at ' + v.businessKey + ' — the guard is suppressing the loop pass'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "} else {",
+                  "  pm.environment.set('pollCount', 0);",
+                  "",
+                  "  pm.test('second pass ran under its own idempotency key', () => pm.expect(v.businessKey).to.eql(secondPassKey));",
+                  "  pm.test('the trend refreshed off DETERIORATING', () => pm.expect(v.vitalsTrend).to.not.eql('DETERIORATING'));",
+                  "  pm.test('the patient recovered', () => pm.expect(v.vitalsTrend).to.be.oneOf(['IMPROVING', 'STABLE']));",
+                  "  pm.test('the discharge gate opened', () => pm.expect(v.dischargeResult.dischargeReady).to.eql(true));",
+                  "",
+                  "  console.log('Pass 2: trend=' + v.vitalsTrend + ' businessKey=' + v.businessKey);",
+                  "  console.log('Gate opened on its own — no diversion needed to reach discharge.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/variables",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "variables"]
+            },
+            "description": "The heart of the regression.\n\nThe vitals element carries an input mapping that folds the attempt counter into `businessKey`, so each loop pass gets its own idempotency key. Without it both passes key on `(caseId, Task_VitalsMonitor)`, the second is misread as an at-least-once redelivery and completed without running, and `vitalsTrend` stays `DETERIORATING` forever — the gate never opens and the journey loops indefinitely.\n\nIf `businessKey` is still `…-vitals-0` here, that mapping has been lost."
+          }
+        },
+        {
+          "name": "01.19 Await discharge AI incident",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const incidents = pm.response.json();",
+                  "const hit = incidents.find(i => i.elementId === 'Task_DischargeSummary' && i.state === 'ACTIVE');",
+                  "",
+                  "if (hit) {",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('discharge AI blocked on the same missing secret', () => pm.expect(hit.errorMessage).to.include('OPENAI_API_KEY'));",
+                  "  console.log('Reached Task_DischargeSummary — a step the journey could not get to before the loop converged.');",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    console.log('No discharge AI incident — the OPENAI_API_KEY secret may now be configured. Skip 01.20 if so.');",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/incidents",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "incidents"]
+            },
+            "description": "Once the gate opens, the journey reaches the second AI task and hits the same missing connector secret. Filtered on state ACTIVE so the resolved history-summary incident from 01.4 is not mistaken for this one."
+          }
+        },
+        {
+          "name": "01.20 Divert past discharge AI summary",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 409) {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 20) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Diversion never became possible', () => pm.expect.fail(pm.response.json().message));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "} else {",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromElementId\": \"Task_DischargeSummary\",\n  \"toElementId\": \"Task_DischargeSignoff\",\n  \"variables\": {\n    \"dischargeSummary\": \"Admitted with chest pain. ACS ruled out. Vitals recovered on a revised plan. Discharged with cardiology follow-up in 2 weeks.\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/diversion",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "diversion"]
+            },
+            "description": "Steps past the blocked AI task with the summary it would have drafted. This is the connector-secret workaround only — the vitals loop now converges unaided.\n\nDelete this request once the secret exists."
+          }
+        },
+        {
+          "name": "01.21 Await Discharge Sign-off",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const want = 'Task_DischargeSignoff';",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === want);",
+                  "",
+                  "if (hit) {",
+                  "  pm.environment.set('userTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test(want + ' is waiting', () => pm.expect(hit.name).to.be.a('string'));",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for ' + want, () => pm.expect.fail('Gave up after 30 polls'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks"]
+            },
+            "description": "Waits for the diversion to take effect."
+          }
+        },
+        {
+          "name": "01.22 Complete Discharge Sign-off",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('pollCount', 0);"
                 ]
               }
             }
@@ -850,39 +873,38 @@
               "raw": "{\n  \"variables\": {\n    \"physicianNotes\": \"Stable at discharge. No further chest pain.\",\n    \"followUpDate\": \"2026-08-12\",\n    \"familyBriefed\": true,\n    \"dischargeDecision\": \"DISCHARGE_HOME\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/user-tasks/{{userTaskKey}}/completion",
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks/Task_DischargeSignoff/completion",
               "host": ["{{baseUrl}}"],
-              "path": ["user-tasks", "{{userTaskKey}}", "completion"]
+              "path": ["cases", "{{processInstanceKey}}", "tasks", "Task_DischargeSignoff", "completion"]
             },
-            "description": "Candidate group `attending-physician`."
+            "description": "The last human step. RecordArchiveWorker then writes the case to PostgreSQL and the instance completes."
           }
         },
         {
-          "name": "02.13 Verify instance completed",
+          "name": "01.23 Await instance completion",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "const body = pm.response.json();",
+                  "const b = pm.response.json();",
                   "",
-                  "if (body.state !== 'COMPLETED') {",
-                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  if (tries > 20) {",
-                  "    pm.environment.unset('pollCount');",
-                  "    pm.test('Instance completed', () => pm.expect.fail('Still ' + body.state + ' after 20 polls'));",
-                  "    return;",
+                  "if (b.state === 'COMPLETED') {",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('instance completed', () => pm.expect(b.state).to.eql('COMPLETED'));",
+                  "  pm.test('finished without an open incident', () => pm.expect(b.hasIncident).to.eql(false));",
+                  "  console.log('Journey complete. Ended ' + b.endDate);",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for completion', () => pm.expect.fail('Still ' + b.state + ' after 30 polls'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
                   "  }",
-                  "  pm.environment.set('pollCount', tries);",
-                  "  pm.execution.setNextRequest('02.13 Verify instance completed');",
-                  "  return;",
-                  "}",
-                  "pm.environment.unset('pollCount');",
-                  "",
-                  "pm.test('Instance COMPLETED', () => pm.expect(body.state).to.eql('COMPLETED'));",
-                  "console.log('Journey finished. Verify the archive row with:');",
-                  "console.log(\"SELECT case_id, patient_name, care_plan, vitals_trend, archived_at FROM patient_case WHERE case_id = '\" + pm.environment.get('caseId') + \"';\");"
+                  "}"
                 ]
               }
             }
@@ -891,26 +913,78 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/process-instances/{{processInstanceKey}}",
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}",
               "host": ["{{baseUrl}}"],
-              "path": ["process-instances", "{{processInstanceKey}}"]
+              "path": ["cases", "{{processInstanceKey}}"]
             },
-            "description": "RecordArchiveWorker writes one `patient_case` row keyed on caseId. Postman cannot query PostgreSQL, so the SQL to confirm it is logged to the console."
+            "description": "Polls the instance until the engine reports COMPLETED."
+          }
+        },
+        {
+          "name": "01.24 Verify archived record",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 404) {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 20) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Archive row never appeared', () => pm.expect.fail('RecordArchiveWorker did not write the case'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "} else {",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "  const r = pm.response.json();",
+                  "",
+                  "  pm.test('archived under this caseId', () => pm.expect(r.caseId).to.eql(pm.environment.get('caseId')));",
+                  "  pm.test('patient captured', () => pm.expect(r.patientName).to.eql('Asha Verma'));",
+                  "  pm.test('care plan persisted', () => pm.expect(r.carePlan).to.eql('CARDIAC_STANDARD'));",
+                  "  pm.test('treatment plan persisted', () => pm.expect(r.treatmentPlan).to.be.a('string').and.not.empty);",
+                  "  pm.test('discharge summary persisted', () => pm.expect(r.dischargeSummary).to.be.a('string').and.not.empty);",
+                  "",
+                  "  // The archived trend is the clearest end-to-end signal that the loop converged:",
+                  "  // it is written by RecordArchiveWorker from the value the second vitals pass produced.",
+                  "  pm.test('archived trend reflects the recovered patient', () => pm.expect(r.vitalsTrend).to.be.oneOf(['IMPROVING', 'STABLE']));",
+                  "",
+                  "  console.log('Archived: ' + r.caseId + ' / ' + r.patientName + ' / ' + r.carePlan + ' / vitalsTrend=' + r.vitalsTrend);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/archive/{{caseId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["archive", "{{caseId}}"]
+            },
+            "description": "Reads the row RecordArchiveWorker wrote to PostgreSQL, straight through the service's own JPA adapter. This is the end-to-end proof: the engine ran the process, the service's Java code handled the archive job, and the data landed in the database.\n\n`vitalsTrend` reads IMPROVING here. A DETERIORATING value would mean the second vitals pass never ran and the journey only reached discharge by intervention."
           }
         }
       ]
     },
     {
-      "name": "03 Exception path",
+      "name": "02 Exception path",
       "item": [
         {
-          "name": "03.1 Start with diagnostics down",
+          "name": "02.1 Admit with diagnostics offline",
           "event": [
             {
               "listen": "prerequest",
               "script": {
                 "type": "text/javascript",
-                "exec": ["pm.environment.set('errCaseId', 'CASE-ERR-' + Date.now());"]
+                "exec": [
+                  "pm.environment.set('errCaseId', 'CASE-PM-ERR-' + Date.now());",
+                  "pm.environment.set('pollCount', 0);"
+                ]
               }
             },
             {
@@ -918,10 +992,10 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "pm.environment.set('errProcessInstanceKey', body.processInstanceKey);",
-                  "console.log('Exception instance ' + body.processInstanceKey);"
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.environment.set('errProcessInstanceKey', b.processInstanceKey);",
+                  "console.log('Exception-path instance ' + b.processInstanceKey);"
                 ]
               }
             }
@@ -931,161 +1005,129 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"processDefinitionId\": \"healthcare-treatment-journey\",\n  \"variables\": {\n    \"caseId\": \"{{errCaseId}}\",\n    \"patientId\": \"PAT-2002\",\n    \"patientName\": \"Ravi Kumar\",\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"MODERATE\",\n    \"diagnosticSystemDown\": true\n  }\n}"
-            },
-            "url": { "raw": "{{baseUrl}}/process-instances", "host": ["{{baseUrl}}"], "path": ["process-instances"] },
-            "description": "`diagnosticSystemDown` makes LabTestOrderWorker raise the BPMN error DIAGNOSTIC_SYSTEM_UNAVAILABLE instead of returning an order."
-          }
-        },
-        {
-          "name": "03.2 Complete Registration",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const poll = (attempt) => {",
-                  "  pm.sendRequest({",
-                  "    url: pm.variables.replaceIn('{{baseUrl}}/user-tasks/search'),",
-                  "    method: 'POST',",
-                  "    header: {",
-                  "      'Content-Type': 'application/json',",
-                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
-                  "    },",
-                  "    body: {",
-                  "      mode: 'raw',",
-                  "      raw: JSON.stringify({",
-                  "        filter: {",
-                  "          processInstanceKey: pm.environment.get('errProcessInstanceKey'),",
-                  "          elementId: 'Task_Registration',",
-                  "          state: 'CREATED'",
-                  "        }",
-                  "      })",
-                  "    }",
-                  "  }, (err, res) => {",
-                  "    const items = (err || !res) ? [] : (res.json().items || []);",
-                  "    if (items.length) {",
-                  "      pm.environment.set('errUserTaskKey', items[0].userTaskKey);",
-                  "    } else if (attempt < 20) {",
-                  "      poll(attempt + 1);",
-                  "    }",
-                  "  });",
-                  "};",
-                  "poll(0);"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": ["pm.test('204 No Content', () => pm.response.to.have.status(204));"]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"variables\": {\n    \"consentObtained\": true,\n    \"allergiesNotes\": \"Penicillin allergy\"\n  }\n}"
+              "raw": "{\n  \"caseId\": \"{{errCaseId}}\",\n  \"variables\": {\n    \"patientId\": \"PAT-9001\",\n    \"patientName\": \"Nisha Rao\",\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"MODERATE\",\n    \"diagnosticSystemDown\": true\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/user-tasks/{{errUserTaskKey}}/completion",
+              "raw": "{{baseUrl}}/cases",
               "host": ["{{baseUrl}}"],
-              "path": ["user-tasks", "{{errUserTaskKey}}", "completion"]
-            }
+              "path": ["cases"]
+            },
+            "description": "`diagnosticSystemDown: true` makes the diagnostics step throw the BPMN error DIAGNOSTIC_SYSTEM_UNAVAILABLE, which the boundary error event catches."
           }
         },
         {
-          "name": "03.3 Skip AI history summary",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const poll = (attempt) => {",
-                  "  pm.sendRequest({",
-                  "    url: pm.variables.replaceIn('{{baseUrl}}/element-instances/search'),",
-                  "    method: 'POST',",
-                  "    header: {",
-                  "      'Content-Type': 'application/json',",
-                  "      'Authorization': 'Bearer ' + pm.environment.get('accessToken')",
-                  "    },",
-                  "    body: {",
-                  "      mode: 'raw',",
-                  "      raw: JSON.stringify({",
-                  "        filter: {",
-                  "          processInstanceKey: pm.environment.get('errProcessInstanceKey'),",
-                  "          elementId: 'Task_HistorySummary',",
-                  "          state: 'ACTIVE'",
-                  "        }",
-                  "      })",
-                  "    }",
-                  "  }, (err, res) => {",
-                  "    const items = (err || !res) ? [] : (res.json().items || []);",
-                  "    if (items.length) {",
-                  "      pm.environment.set('errAiElementInstanceKey', items[0].elementInstanceKey);",
-                  "    } else if (attempt < 20) {",
-                  "      poll(attempt + 1);",
-                  "    }",
-                  "  });",
-                  "};",
-                  "poll(0);"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": ["pm.test('204 No Content', () => pm.response.to.have.status(204));"]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"activateInstructions\": [\n    {\n      \"elementId\": \"Task_Triage\",\n      \"variableInstructions\": [\n        { \"variables\": { \"historySummary\": \"58M, smoker, chest discomfort on exertion.\" } }\n      ]\n    }\n  ],\n  \"terminateInstructions\": [\n    { \"elementInstanceKey\": \"{{errAiElementInstanceKey}}\" }\n  ]\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/process-instances/{{errProcessInstanceKey}}/modification",
-              "host": ["{{baseUrl}}"],
-              "path": ["process-instances", "{{errProcessInstanceKey}}", "modification"]
-            }
-          }
-        },
-        {
-          "name": "03.4 Verify escalation task raised",
+          "name": "02.2 Await and complete Registration",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "const items = pm.response.json().items || [];",
-                  "const escalation = items.find(t => t.elementId === 'Task_EscalatePhysician');",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === 'Task_Registration');",
                   "",
-                  "if (!escalation) {",
-                  "  const tries = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  if (tries > 25) {",
-                  "    pm.environment.unset('pollCount');",
-                  "    pm.test('Escalation raised', () => pm.expect.fail('Task_EscalatePhysician never appeared'));",
-                  "    return;",
+                  "if (hit) {",
+                  "  pm.environment.set('errUserTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('Registration is waiting', () => pm.expect(hit.name).to.be.a('string'));",
+                  "",
+                  "  pm.sendRequest({",
+                  "    url: pm.environment.get('baseUrl') + '/tasks/' + hit.userTaskKey + '/completion',",
+                  "    method: 'POST',",
+                  "    header: { 'Content-Type': 'application/json' },",
+                  "    body: { mode: 'raw', raw: JSON.stringify({ variables: { consentObtained: true } }) }",
+                  "  }, (err, res) => {",
+                  "    pm.test('Registration completed by key', () => pm.expect(res.code).to.eql(204));",
+                  "  });",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 25) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for Registration', () => pm.expect.fail('Gave up after 25 polls'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
                   "  }",
-                  "  pm.environment.set('pollCount', tries);",
-                  "  pm.execution.setNextRequest('03.4 Verify escalation task raised');",
-                  "  return;",
-                  "}",
-                  "pm.environment.unset('pollCount');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{errProcessInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{errProcessInstanceKey}}", "tasks"]
+            },
+            "description": "Polls for the task, then completes it by engine key from the test script — exercising the `/tasks/{taskKey}/completion` endpoint alongside the element-id form used elsewhere."
+          }
+        },
+        {
+          "name": "02.3 Await AI incident",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Registration was completed from the previous request's script, so the AI task has",
+                  "// only just been reached. Diverting before it is actually active returns 409, so",
+                  "// wait for its incident first — the same reason the happy path polls at 01.4.",
+                  "const incidents = pm.response.json();",
+                  "const hit = incidents.find(i => i.elementId === 'Task_HistorySummary');",
                   "",
-                  "pm.test('Boundary error routed to escalation', () => pm.expect(escalation.state).to.eql('CREATED'));",
-                  "pm.environment.set('errUserTaskKey', escalation.userTaskKey);",
-                  "console.log('DIAGNOSTIC_SYSTEM_UNAVAILABLE handled — escalation task ' + escalation.userTaskKey);"
+                  "if (hit) {",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('AI connector incident raised', () => pm.expect(hit.errorMessage).to.include('OPENAI_API_KEY'));",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 25) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    console.log('No AI incident — the OPENAI_API_KEY secret may now be configured. Skip 02.4 if so.');",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{errProcessInstanceKey}}/incidents",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{errProcessInstanceKey}}", "incidents"]
+            },
+            "description": "Waits for the AI task to actually fail before 02.4 tries to divert past it. Without this the diversion races the engine and returns 409."
+          }
+        },
+        {
+          "name": "02.4 Divert past AI summary",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 409) {",
+                  "  // The element was not active yet. Retry rather than failing the run.",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 15) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Diversion never became possible', () => pm.expect.fail(pm.response.json().message));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "} else {",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "}"
                 ]
               }
             }
@@ -1095,14 +1137,60 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"filter\": {\n    \"processInstanceKey\": \"{{errProcessInstanceKey}}\",\n    \"state\": \"CREATED\"\n  }\n}"
+              "raw": "{\n  \"fromElementId\": \"Task_HistorySummary\",\n  \"toElementId\": \"Task_Triage\",\n  \"variables\": {\n    \"historySummary\": \"Exception-path run: diagnostics system reported offline.\"\n  }\n}"
             },
-            "url": { "raw": "{{baseUrl}}/user-tasks/search", "host": ["{{baseUrl}}"], "path": ["user-tasks", "search"] },
-            "description": "The whole point of this folder: the worker throws a BPMN error, the boundary error event on the diagnostics sub-process catches it, and Escalate to Physician appears for `attending-physician`."
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{errProcessInstanceKey}}/diversion",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{errProcessInstanceKey}}", "diversion"]
+            },
+            "description": "Same AI workaround as the happy path. Retries itself on 409, which means the AI task had not yet become active."
           }
         },
         {
-          "name": "03.5 Cancel exception instance",
+          "name": "02.5 Verify escalation raised",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const want = 'Task_EscalatePhysician';",
+                  "const tasks = pm.response.json();",
+                  "const hit = tasks.find(t => t.elementId === want);",
+                  "",
+                  "if (hit) {",
+                  "  pm.environment.set('errUserTaskKey', hit.userTaskKey);",
+                  "  pm.environment.set('pollCount', 0);",
+                  "  pm.test('boundary error routed to physician escalation', () => pm.expect(hit.elementId).to.eql(want));",
+                  "  console.log('Exception path reached: ' + hit.name);",
+                  "} else {",
+                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
+                  "  pm.environment.set('pollCount', n);",
+                  "  if (n > 30) {",
+                  "    pm.environment.set('pollCount', 0);",
+                  "    pm.test('Timed out waiting for ' + want, () => pm.expect.fail('Escalation never appeared'));",
+                  "  } else {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{errProcessInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{errProcessInstanceKey}}", "tasks"]
+            },
+            "description": "The diagnostics sub-process throws DIAGNOSTIC_SYSTEM_UNAVAILABLE, the boundary error event catches it, and the journey diverts to physician escalation instead of continuing to treatment."
+          }
+        },
+        {
+          "name": "02.6 Cancel exception instance",
           "event": [
             {
               "listen": "test",
@@ -1110,30 +1198,29 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "console.log('Exception instance cancelled — cleanup done');"
+                  "console.log('Exception-path instance cancelled — it is parked on a human step by design.');"
                 ]
               }
             }
           ],
           "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{}" },
+            "method": "DELETE",
+            "header": [],
             "url": {
-              "raw": "{{baseUrl}}/process-instances/{{errProcessInstanceKey}}/cancellation",
+              "raw": "{{baseUrl}}/cases/{{errProcessInstanceKey}}",
               "host": ["{{baseUrl}}"],
-              "path": ["process-instances", "{{errProcessInstanceKey}}", "cancellation"]
+              "path": ["cases", "{{errProcessInstanceKey}}"]
             },
-            "description": "The escalation branch ends at ErrEnd_1 once completed. Cancelling instead keeps the cluster tidy when re-running the collection."
+            "description": "The escalation task has no automated follow-through, so the instance would sit there forever. Cancelling keeps the cluster tidy between runs."
           }
         }
       ]
     },
     {
-      "name": "04 Scenario variants",
+      "name": "03 Decision tables",
       "item": [
         {
-          "name": "Triage — CRITICAL (4 diagnostics)",
+          "name": "03.1 Triage — chest pain, critical",
           "event": [
             {
               "listen": "test",
@@ -1141,13 +1228,11 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "const out = pm.response.json().output;",
-                  "const parsed = typeof out === 'string' ? JSON.parse(out) : out;",
-                  "pm.test('rule_01 matched', () => pm.expect(pm.response.json().evaluatedDecisions[0].matchedRules[0].ruleId).to.eql('rule_01'));",
-                  "pm.test('CARDIAC_CRITICAL pathway', () => pm.expect(parsed.carePlan).to.eql('CARDIAC_CRITICAL'));",
-                  "pm.test('Four diagnostics fan out', () => pm.expect(parsed.diagnosticTests).to.have.lengthOf(4));",
-                  "pm.test('P1 priority', () => pm.expect(parsed.priority).to.eql('P1'));",
-                  "pm.test('CCU ward', () => pm.expect(parsed.assignedWard).to.eql('CCU'));"
+                  "const r = pm.response.json();",
+                  "pm.test('rule_01 matched', () => pm.expect(r.matchedRuleIds).to.include('rule_01'));",
+                  "pm.test('cardiac critical pathway', () => pm.expect(r.output.carePlan).to.eql('CARDIAC_CRITICAL'));",
+                  "pm.test('highest priority', () => pm.expect(r.output.priority).to.eql('P1'));",
+                  "pm.test('coronary care unit', () => pm.expect(r.output.assignedWard).to.eql('CCU'));"
                 ]
               }
             }
@@ -1157,18 +1242,18 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"decisionDefinitionId\": \"triage-care-pathway\",\n  \"variables\": {\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"CRITICAL\"\n  }\n}"
+              "raw": "{\n  \"variables\": {\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"CRITICAL\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/decision-definitions/evaluation",
+              "raw": "{{baseUrl}}/decisions/triage-care-pathway/evaluation",
               "host": ["{{baseUrl}}"],
-              "path": ["decision-definitions", "evaluation"]
+              "path": ["decisions", "triage-care-pathway", "evaluation"]
             },
-            "description": "Evaluates the DMN directly, without starting a process. rule_01 → ECG, ECHO, TROPONIN, CARDIOLOGY_WORKUP."
+            "description": "Evaluates the decision table directly, without running a process — the fastest way to check a rule change."
           }
         },
         {
-          "name": "Triage — RESPIRATORY / ICU",
+          "name": "03.2 Triage — chest pain, moderate",
           "event": [
             {
               "listen": "test",
@@ -1176,10 +1261,10 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "const out = pm.response.json().output;",
-                  "const parsed = typeof out === 'string' ? JSON.parse(out) : out;",
-                  "pm.test('RESPIRATORY_CARE pathway', () => pm.expect(parsed.carePlan).to.eql('RESPIRATORY_CARE'));",
-                  "pm.test('ICU ward', () => pm.expect(parsed.assignedWard).to.eql('ICU'));"
+                  "const r = pm.response.json();",
+                  "pm.test('rule_02 matched', () => pm.expect(r.matchedRuleIds).to.include('rule_02'));",
+                  "pm.test('standard cardiac pathway', () => pm.expect(r.output.carePlan).to.eql('CARDIAC_STANDARD'));",
+                  "pm.test('two diagnostics ordered', () => pm.expect(r.output.diagnosticTests).to.have.members(['ECG', 'CARDIOLOGY_WORKUP']));"
                 ]
               }
             }
@@ -1189,18 +1274,18 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"decisionDefinitionId\": \"triage-care-pathway\",\n  \"variables\": {\n    \"admissionType\": \"WALK_IN\",\n    \"chiefComplaint\": \"RESPIRATORY\",\n    \"vitalsSeverity\": \"CRITICAL\"\n  }\n}"
+              "raw": "{\n  \"variables\": {\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"MODERATE\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/decision-definitions/evaluation",
+              "raw": "{{baseUrl}}/decisions/triage-care-pathway/evaluation",
               "host": ["{{baseUrl}}"],
-              "path": ["decision-definitions", "evaluation"]
+              "path": ["decisions", "triage-care-pathway", "evaluation"]
             },
-            "description": "rule_03 — admissionType is a blank (any) cell, so a walk-in still routes to respiratory care."
+            "description": "The pathway the happy path takes."
           }
         },
         {
-          "name": "Triage — default GENERAL_CARE",
+          "name": "03.3 Triage — respiratory, critical",
           "event": [
             {
               "listen": "test",
@@ -1208,10 +1293,10 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "const out = pm.response.json().output;",
-                  "const parsed = typeof out === 'string' ? JSON.parse(out) : out;",
-                  "pm.test('Falls through to GENERAL_CARE', () => pm.expect(parsed.carePlan).to.eql('GENERAL_CARE'));",
-                  "pm.test('P3 priority', () => pm.expect(parsed.priority).to.eql('P3'));"
+                  "const r = pm.response.json();",
+                  "pm.test('rule_03 matched', () => pm.expect(r.matchedRuleIds).to.include('rule_03'));",
+                  "pm.test('respiratory pathway', () => pm.expect(r.output.carePlan).to.eql('RESPIRATORY_CARE'));",
+                  "pm.test('intensive care', () => pm.expect(r.output.assignedWard).to.eql('ICU'));"
                 ]
               }
             }
@@ -1221,18 +1306,18 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"decisionDefinitionId\": \"triage-care-pathway\",\n  \"variables\": {\n    \"admissionType\": \"WALK_IN\",\n    \"chiefComplaint\": \"ABDOMINAL_PAIN\",\n    \"vitalsSeverity\": \"LOW\"\n  }\n}"
+              "raw": "{\n  \"variables\": {\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"RESPIRATORY\",\n    \"vitalsSeverity\": \"CRITICAL\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/decision-definitions/evaluation",
+              "raw": "{{baseUrl}}/decisions/triage-care-pathway/evaluation",
               "host": ["{{baseUrl}}"],
-              "path": ["decision-definitions", "evaluation"]
+              "path": ["decisions", "triage-care-pathway", "evaluation"]
             },
-            "description": "rule_05 catch-all. Confirms hit policy FIRST leaves no input combination unmatched."
+            "description": "Rule 3 ignores admission type — it matches on complaint and severity alone."
           }
         },
         {
-          "name": "Discharge readiness — direct evaluation",
+          "name": "03.4 Triage — neurological",
           "event": [
             {
               "listen": "test",
@@ -1240,10 +1325,10 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "const out = pm.response.json().output;",
-                  "const parsed = typeof out === 'string' ? JSON.parse(out) : out;",
-                  "console.log('dischargeReady=' + parsed.dischargeReady + ' reason=' + parsed.dischargeReason);",
-                  "pm.test('Returns a decision', () => pm.expect(parsed).to.have.property('dischargeReady'));"
+                  "const r = pm.response.json();",
+                  "pm.test('rule_04 matched', () => pm.expect(r.matchedRuleIds).to.include('rule_04'));",
+                  "pm.test('neuro pathway', () => pm.expect(r.output.carePlan).to.eql('NEURO_CARE'));",
+                  "pm.test('P1 regardless of severity', () => pm.expect(r.output.priority).to.eql('P1'));"
                 ]
               }
             }
@@ -1253,18 +1338,18 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"decisionDefinitionId\": \"discharge-readiness\",\n  \"variables\": {\n    \"treatmentStepsCompleted\": true,\n    \"labResultsNormal\": true,\n    \"vitalsTrend\": \"STABLE\"\n  }\n}"
+              "raw": "{\n  \"variables\": {\n    \"admissionType\": \"OP\",\n    \"chiefComplaint\": \"NEUROLOGICAL\",\n    \"vitalsSeverity\": \"MILD\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/decision-definitions/evaluation",
+              "raw": "{{baseUrl}}/decisions/triage-care-pathway/evaluation",
               "host": ["{{baseUrl}}"],
-              "path": ["decision-definitions", "evaluation"]
+              "path": ["decisions", "triage-care-pathway", "evaluation"]
             },
-            "description": "Vary `vitalsTrend` across STABLE / IMPROVING / DETERIORATING to exercise every row. Useful because the in-process path cannot currently reach STABLE — see the idempotency defect."
+            "description": "Rule 4 leaves severity blank, so any neurological complaint is P1 even when presenting mildly."
           }
         },
         {
-          "name": "Publish VitalsAlert manually",
+          "name": "03.5 Triage — unrecognised severity falls through",
           "event": [
             {
               "listen": "test",
@@ -1272,9 +1357,15 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "console.log('Message key ' + body.messageKey);",
-                  "pm.test('Message accepted', () => pm.expect(body.messageKey).to.be.a('string'));"
+                  "const r = pm.response.json();",
+                  "",
+                  "pm.test('catch-all rule matched', () => pm.expect(r.matchedRuleIds).to.include('rule_05'));",
+                  "pm.test('downgraded to general care', () => pm.expect(r.output.carePlan).to.eql('GENERAL_CARE'));",
+                  "pm.test('downgraded to P3', () => pm.expect(r.output.priority).to.eql('P3'));",
+                  "",
+                  "console.warn('A chest-pain patient was routed to GENERAL_CARE / P3 / GENERAL ward because vitalsSeverity was SEVERE.');",
+                  "console.warn('The table recognises only CRITICAL and MODERATE for chest pain; anything else hits the catch-all.');",
+                  "console.warn('Nothing validates this input, so a typo silently downgrades a cardiac patient.');"
                 ]
               }
             }
@@ -1284,113 +1375,280 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"VitalsAlert\",\n  \"correlationKey\": \"{{caseId}}\",\n  \"timeToLive\": 600000,\n  \"variables\": {\n    \"alertMessage\": \"Manually injected vitals alert\",\n    \"vitalsTrend\": \"DETERIORATING\"\n  }\n}"
+              "raw": "{\n  \"variables\": {\n    \"admissionType\": \"ER\",\n    \"chiefComplaint\": \"CHEST_PAIN\",\n    \"vitalsSeverity\": \"SEVERE\"\n  }\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/messages/publication",
+              "raw": "{{baseUrl}}/decisions/triage-care-pathway/evaluation",
               "host": ["{{baseUrl}}"],
-              "path": ["messages", "publication"]
+              "path": ["decisions", "triage-care-pathway", "evaluation"]
             },
-            "description": "Correlates on `caseId` into the non-interrupting message start event of the vitals-alert event sub-process, independently of the worker. Run while the instance is inside the treatment sub-process."
+            "description": "Documents a real gap rather than a feature. `SEVERE` reads like a valid severity but is not in the table's vocabulary, so a chest-pain patient drops from CARDIAC_CRITICAL / P1 / CCU to GENERAL_CARE / P3 / GENERAL.\n\nThe hit policy is FIRST and rule 5 matches anything, so the fall-through is silent. Worth either constraining the input to an enum or adding an explicit unmatched-severity rule."
+          }
+        },
+        {
+          "name": "03.6 Discharge — improving",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('rule_03 matched', () => pm.expect(r.matchedRuleIds).to.include('rule_03'));",
+                  "pm.test('cleared for discharge', () => pm.expect(r.output.dischargeReady).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"vitalsTrend\": \"IMPROVING\",\n    \"labResultsNormal\": true,\n    \"treatmentStepsCompleted\": true\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/decisions/discharge-readiness/evaluation",
+              "host": ["{{baseUrl}}"],
+              "path": ["decisions", "discharge-readiness", "evaluation"]
+            },
+            "description": "Proves the decision table is not the reason the happy path stalls."
+          }
+        },
+        {
+          "name": "03.7 Discharge — stable",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('rule_02 matched', () => pm.expect(r.matchedRuleIds).to.include('rule_02'));",
+                  "pm.test('cleared for discharge', () => pm.expect(r.output.dischargeReady).to.eql(true));",
+                  "console.log('STABLE clears too, so a patient who has held a clean state is not trapped in the loop.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"vitalsTrend\": \"STABLE\",\n    \"labResultsNormal\": true,\n    \"treatmentStepsCompleted\": true\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/decisions/discharge-readiness/evaluation",
+              "host": ["{{baseUrl}}"],
+              "path": ["decisions", "discharge-readiness", "evaluation"]
+            },
+            "description": "Together with 03.6, confirms both recovered trends open the gate. When the loop was stuck this pair proved the decision table was sound and the stale trend feeding it was at fault."
+          }
+        },
+        {
+          "name": "03.8 Discharge — deteriorating",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('rule_01 matched', () => pm.expect(r.matchedRuleIds).to.include('rule_01'));",
+                  "pm.test('held back', () => pm.expect(r.output.dischargeReady).to.eql(false));",
+                  "pm.test('reason given', () => pm.expect(r.output.dischargeReason).to.include('deteriorating'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"vitalsTrend\": \"DETERIORATING\",\n    \"labResultsNormal\": true,\n    \"treatmentStepsCompleted\": true\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/decisions/discharge-readiness/evaluation",
+              "host": ["{{baseUrl}}"],
+              "path": ["decisions", "discharge-readiness", "evaluation"]
+            },
+            "description": "The verdict the first loop pass gets, which is what sends the journey back for a revised plan."
           }
         }
       ]
     },
     {
-      "name": "05 Utilities",
+      "name": "04 Utilities",
       "item": [
         {
-          "name": "List active user tasks",
+          "name": "List waiting tasks",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.response.json().forEach(t => console.log(t.elementId + ' — ' + t.name + ' (key ' + t.userTaskKey + ')'));"
+                ]
+              }
+            }
+          ],
           "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filter\": {\n    \"processInstanceKey\": \"{{processInstanceKey}}\",\n    \"state\": \"CREATED\"\n  }\n}"
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "tasks"]
             },
-            "url": { "raw": "{{baseUrl}}/user-tasks/search", "host": ["{{baseUrl}}"], "path": ["user-tasks", "search"] }
+            "description": "Where is this journey waiting right now?"
           }
         },
         {
           "name": "List all variables",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" },\n  \"page\": { \"limit\": 200 }\n}"
-            },
-            "url": { "raw": "{{baseUrl}}/variables/search", "host": ["{{baseUrl}}"], "path": ["variables", "search"] }
-          }
-        },
-        {
-          "name": "List active elements",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filter\": {\n    \"processInstanceKey\": \"{{processInstanceKey}}\",\n    \"state\": \"ACTIVE\"\n  }\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/element-instances/search",
-              "host": ["{{baseUrl}}"],
-              "path": ["element-instances", "search"]
-            },
-            "description": "Shows exactly where the token is parked. The fastest way to diagnose a stuck instance."
-          }
-        },
-        {
-          "name": "List incidents",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filter\": { \"processInstanceKey\": \"{{processInstanceKey}}\" }\n}"
-            },
-            "url": { "raw": "{{baseUrl}}/incidents/search", "host": ["{{baseUrl}}"], "path": ["incidents", "search"] }
-          }
-        },
-        {
-          "name": "Cancel instance",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{}" },
-            "url": {
-              "raw": "{{baseUrl}}/process-instances/{{processInstanceKey}}/cancellation",
-              "host": ["{{baseUrl}}"],
-              "path": ["process-instances", "{{processInstanceKey}}", "cancellation"]
-            }
-          }
-        },
-        {
-          "name": "Local service health",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "const body = pm.response.json();",
-                  "pm.test('Database UP', () => pm.expect(body.components.db.status).to.eql('UP'));",
-                  "pm.test('Camunda client UP', () => pm.expect(body.components.camundaClient.status).to.eql('UP'));",
-                  "pm.test('Database is PostgreSQL', () => pm.expect(body.components.db.details.database).to.eql('PostgreSQL'));"
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const v = pm.response.json();",
+                  "Object.keys(v).sort().forEach(k => console.log(k + ' = ' + JSON.stringify(v[k])));"
                 ]
               }
             }
           ],
           "request": {
-            "auth": { "type": "noauth" },
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{localBaseUrl}}/actuator/health",
-              "host": ["{{localBaseUrl}}"],
-              "path": ["actuator", "health"]
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/variables",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "variables"]
             },
-            "description": "Hits the Spring Boot app, not Camunda. Returns 503 overall whenever camundaClient is DOWN, which is the usual sign the CAMUNDA_* environment variables are missing."
+            "description": "Every process variable, JSON payloads parsed rather than returned as escaped strings.\n\nExpect connector plumbing — `url`, `method`, `headers`, `body`, `authentication` — to appear at process scope after the AI task fails. Those are the connector's own inputs leaking into process scope because it raised an incident before scoping its outputs."
+          }
+        },
+        {
+          "name": "List incidents",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const list = pm.response.json();",
+                  "if (!list.length) { console.log('No incidents.'); }",
+                  "list.forEach(i => console.log('[' + i.state + '] ' + i.elementId + ': ' + i.errorMessage));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/incidents",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "incidents"]
+            },
+            "description": "Includes resolved incidents, so a diverted AI task still shows here with state RESOLVED."
+          }
+        },
+        {
+          "name": "List active elements",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.response.json().forEach(e => console.log(e.elementId + ' [' + e.type + '] key=' + e.elementInstanceKey));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/elements",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}", "elements"]
+            },
+            "description": "Useful when a diversion returns 409 — it tells you what is actually active, which is what `fromElementId` must name.\n\nResults lag a second or two behind a modification; if the list looks stale, send it again."
+          }
+        },
+        {
+          "name": "Raise vitals alert",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+                  "console.log('Published. 202 means the engine accepted the message, not that it correlated.');",
+                  "console.log('The VitalsAlert subscription lives inside SubProcess_Treatment, so it only catches while the journey is inside treatment execution.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"variables\": {\n    \"alertSource\": \"MANUAL_API\",\n    \"alertSeverity\": \"HIGH\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{caseId}}/vitals-alerts",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{caseId}}", "vitals-alerts"]
+            },
+            "description": "Correlates a VitalsAlert message by `caseId` into the non-interrupting event sub-process.\n\nThe subscription is scoped to SubProcess_Treatment, so publishing while the journey sits elsewhere — at Task_TreatmentPlan after a loop, for instance — succeeds but correlates nothing until the message TTL expires. Check for `alertSource` in the variables to confirm it landed."
+          }
+        },
+        {
+          "name": "Cancel instance",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// In a full-collection run the happy-path instance has already completed by now,",
+                  "// and the engine answers 404 for an instance that no longer exists. That is the",
+                  "// correct outcome, not a failure — assert on either.",
+                  "pm.test('cancelled, or already finished', () => pm.expect(pm.response.code).to.be.oneOf([204, 404]));",
+                  "",
+                  "if (pm.response.code === 404) {",
+                  "  console.log('Instance already finished — nothing to cancel.');",
+                  "} else {",
+                  "  console.log('Instance cancelled.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["cases", "{{processInstanceKey}}"]
+            },
+            "description": "Terminates the journey. Use it to clear an instance left parked on a human step.\n\nReturns 404 if the instance has already finished — which is what happens when the whole collection is run in order, since the happy path completes its instance."
           }
         }
       ]
