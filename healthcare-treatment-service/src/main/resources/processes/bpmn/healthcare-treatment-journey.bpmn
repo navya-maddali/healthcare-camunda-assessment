@@ -246,6 +246,7 @@
           <zeebe:ioMapping>
             <zeebe:input source="=patientId" target="patientId" />
             <zeebe:input source="=caseId" target="caseId" />
+            <zeebe:input source="=caseId + &#34;-vitals-&#34; + string(if dischargeAttemptCount = null then 0 else dischargeAttemptCount)" target="businessKey" />
             <zeebe:output source="=vitalsTrend" target="vitalsTrend" />
             <zeebe:output source="=vitalsAlertRaised" target="vitalsAlertRaised" />
           </zeebe:ioMapping>
