@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/"
+             xmlns:dmndi="https://www.omg.org/spec/DMN/20191111/DMNDI/"
+             xmlns:dc="http://www.omg.org/spec/DMN/20180521/DC/"
+             id="definitions_triage"
+             name="Triage and Care Pathway"
+             namespace="http://camunda.org/schema/1.0/dmn">
+  <decision id="triage-care-pathway" name="Triage and Care Pathway">
+    <decisionTable id="decisionTable_triage" hitPolicy="FIRST">
+      <input id="input_admission" label="admissionType">
+        <inputExpression id="inputExpr_admission" typeRef="string">
+          <text>admissionType</text>
+        </inputExpression>
+      </input>
+      <input id="input_complaint" label="chiefComplaint">
+        <inputExpression id="inputExpr_complaint" typeRef="string">
+          <text>chiefComplaint</text>
+        </inputExpression>
+      </input>
+      <input id="input_severity" label="vitalsSeverity">
+        <inputExpression id="inputExpr_severity" typeRef="string">
+          <text>vitalsSeverity</text>
+        </inputExpression>
+      </input>
+      <output id="output_carePlan" label="carePlan" name="carePlan" typeRef="string" />
+      <output id="output_tests" label="diagnosticTests" name="diagnosticTests" typeRef="string" />
+      <output id="output_priority" label="priority" name="priority" typeRef="string" />
+      <output id="output_ward" label="assignedWard" name="assignedWard" typeRef="string" />
+      <rule id="rule_01">
+        <inputEntry id="r01_i1"><text>"ER"</text></inputEntry>
+        <inputEntry id="r01_i2"><text>"CHEST_PAIN"</text></inputEntry>
+        <inputEntry id="r01_i3"><text>"CRITICAL"</text></inputEntry>
+        <outputEntry id="r01_o1"><text>"CARDIAC_CRITICAL"</text></outputEntry>
+        <outputEntry id="r01_o2"><text>["ECG","ECHO","TROPONIN","CARDIOLOGY_WORKUP"]</text></outputEntry>
+        <outputEntry id="r01_o3"><text>"P1"</text></outputEntry>
+        <outputEntry id="r01_o4"><text>"CCU"</text></outputEntry>
+      </rule>
+      <rule id="rule_02">
+        <inputEntry id="r02_i1"><text>"ER"</text></inputEntry>
+        <inputEntry id="r02_i2"><text>"CHEST_PAIN"</text></inputEntry>
+        <inputEntry id="r02_i3"><text>"MODERATE"</text></inputEntry>
+        <outputEntry id="r02_o1"><text>"CARDIAC_STANDARD"</text></outputEntry>
+        <outputEntry id="r02_o2"><text>["ECG","CARDIOLOGY_WORKUP"]</text></outputEntry>
+        <outputEntry id="r02_o3"><text>"P2"</text></outputEntry>
+        <outputEntry id="r02_o4"><text>"CCU"</text></outputEntry>
+      </rule>
+      <rule id="rule_03">
+        <inputEntry id="r03_i1"><text></text></inputEntry>
+        <inputEntry id="r03_i2"><text>"RESPIRATORY"</text></inputEntry>
+        <inputEntry id="r03_i3"><text>"CRITICAL"</text></inputEntry>
+        <outputEntry id="r03_o1"><text>"RESPIRATORY_CARE"</text></outputEntry>
+        <outputEntry id="r03_o2"><text>["CHEST_XRAY","LAB_COMPLETE"]</text></outputEntry>
+        <outputEntry id="r03_o3"><text>"P1"</text></outputEntry>
+        <outputEntry id="r03_o4"><text>"ICU"</text></outputEntry>
+      </rule>
+      <rule id="rule_04">
+        <inputEntry id="r04_i1"><text></text></inputEntry>
+        <inputEntry id="r04_i2"><text>"NEUROLOGICAL"</text></inputEntry>
+        <inputEntry id="r04_i3"><text></text></inputEntry>
+        <outputEntry id="r04_o1"><text>"NEURO_CARE"</text></outputEntry>
+        <outputEntry id="r04_o2"><text>["CT_BRAIN","LAB_COMPLETE","CARDIOLOGY_WORKUP"]</text></outputEntry>
+        <outputEntry id="r04_o3"><text>"P1"</text></outputEntry>
+        <outputEntry id="r04_o4"><text>"NEURO"</text></outputEntry>
+      </rule>
+      <rule id="rule_05">
+        <inputEntry id="r05_i1"><text></text></inputEntry>
+        <inputEntry id="r05_i2"><text></text></inputEntry>
+        <inputEntry id="r05_i3"><text></text></inputEntry>
+        <outputEntry id="r05_o1"><text>"GENERAL_CARE"</text></outputEntry>
+        <outputEntry id="r05_o2"><text>["LAB_COMPLETE","CHEST_XRAY"]</text></outputEntry>
+        <outputEntry id="r05_o3"><text>"P3"</text></outputEntry>
+        <outputEntry id="r05_o4"><text>"GENERAL"</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+</definitions>

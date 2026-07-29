@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+target/
+*.jar.original
+
+# ---------------------------------------------------------------------------
+# Redundant archive — the unpacked framework source is tracked, so the zip is a
+# duplicate and large enough to slow every clone.
+# ---------------------------------------------------------------------------
+*.zip
+
+# ---------------------------------------------------------------------------
+# Assessment brief — binary document, not source.
+# ---------------------------------------------------------------------------
+*.docx
+
+# ---------------------------------------------------------------------------
+# SECRETS — do not remove.
+#
+# The framework's service-template ships a real Camunda SaaS client-id,
+# client-secret and cluster-id hardcoded in its application.yml. The framework
+# is consumed as a published artifact and is never modified, so the file is
+# excluded here rather than edited in place. Those credentials should be
+# rotated in Camunda Console.
+# ---------------------------------------------------------------------------
+camunda-process-framework-0.1.1 (3)/camunda-process-framework-0.1.1/service-template/src/main/resources/application.yml
+
+.env
+*.local.yml
+
+# ---------------------------------------------------------------------------
+# IDE
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# ---------------------------------------------------------------------------
+# Tooling / OS
+# ---------------------------------------------------------------------------
+.claude/settings.local.json
+Thumbs.db
+.DS_Store
+*.log
+scratch/

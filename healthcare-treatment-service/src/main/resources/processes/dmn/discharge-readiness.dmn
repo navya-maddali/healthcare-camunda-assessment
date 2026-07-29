@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/"
+             xmlns:dmndi="https://www.omg.org/spec/DMN/20191111/DMNDI/"
+             xmlns:dc="http://www.omg.org/spec/DMN/20180521/DC/"
+             id="definitions_discharge"
+             name="Discharge Readiness"
+             namespace="http://camunda.org/schema/1.0/dmn">
+  <decision id="discharge-readiness" name="Discharge Readiness">
+    <decisionTable id="decisionTable_discharge" hitPolicy="UNIQUE">
+      <input id="input_trend" label="vitalsTrend">
+        <inputExpression id="inputExpr_trend" typeRef="string">
+          <text>vitalsTrend</text>
+        </inputExpression>
+      </input>
+      <input id="input_treatment" label="treatmentStepsCompleted">
+        <inputExpression id="inputExpr_treatment" typeRef="boolean">
+          <text>treatmentStepsCompleted</text>
+        </inputExpression>
+      </input>
+      <input id="input_labs" label="labResultsNormal">
+        <inputExpression id="inputExpr_labs" typeRef="boolean">
+          <text>labResultsNormal</text>
+        </inputExpression>
+      </input>
+      <output id="output_ready" label="dischargeReady" name="dischargeReady" typeRef="boolean" />
+      <output id="output_reason" label="dischargeReason" name="dischargeReason" typeRef="string" />
+      <rule id="rule_01">
+        <inputEntry id="r01_i1"><text>"DETERIORATING"</text></inputEntry>
+        <inputEntry id="r01_i2"><text></text></inputEntry>
+        <inputEntry id="r01_i3"><text></text></inputEntry>
+        <outputEntry id="r01_o1"><text>false</text></outputEntry>
+        <outputEntry id="r01_o2"><text>"Vitals deteriorating. Clinical review required."</text></outputEntry>
+      </rule>
+      <rule id="rule_02">
+        <inputEntry id="r02_i1"><text>"STABLE"</text></inputEntry>
+        <inputEntry id="r02_i2"><text>true</text></inputEntry>
+        <inputEntry id="r02_i3"><text>true</text></inputEntry>
+        <outputEntry id="r02_o1"><text>true</text></outputEntry>
+        <outputEntry id="r02_o2"><text>"All discharge criteria met. Patient cleared."</text></outputEntry>
+      </rule>
+      <rule id="rule_03">
+        <inputEntry id="r03_i1"><text>"IMPROVING"</text></inputEntry>
+        <inputEntry id="r03_i2"><text>true</text></inputEntry>
+        <inputEntry id="r03_i3"><text>true</text></inputEntry>
+        <outputEntry id="r03_o1"><text>true</text></outputEntry>
+        <outputEntry id="r03_o2"><text>"All discharge criteria met. Patient cleared."</text></outputEntry>
+      </rule>
+      <rule id="rule_04">
+        <inputEntry id="r04_i1"><text>"STABLE"</text></inputEntry>
+        <inputEntry id="r04_i2"><text>false</text></inputEntry>
+        <inputEntry id="r04_i3"><text></text></inputEntry>
+        <outputEntry id="r04_o1"><text>false</text></outputEntry>
+        <outputEntry id="r04_o2"><text>"Treatment course not completed."</text></outputEntry>
+      </rule>
+      <rule id="rule_05">
+        <inputEntry id="r05_i1"><text>"IMPROVING"</text></inputEntry>
+        <inputEntry id="r05_i2"><text>false</text></inputEntry>
+        <inputEntry id="r05_i3"><text></text></inputEntry>
+        <outputEntry id="r05_o1"><text>false</text></outputEntry>
+        <outputEntry id="r05_o2"><text>"Treatment course not completed."</text></outputEntry>
+      </rule>
+      <rule id="rule_06">
+        <inputEntry id="r06_i1"><text>"STABLE"</text></inputEntry>
+        <inputEntry id="r06_i2"><text>true</text></inputEntry>
+        <inputEntry id="r06_i3"><text>false</text></inputEntry>
+        <outputEntry id="r06_o1"><text>false</text></outputEntry>
+        <outputEntry id="r06_o2"><text>"Abnormal lab results. Review required."</text></outputEntry>
+      </rule>
+      <rule id="rule_07">
+        <inputEntry id="r07_i1"><text>"IMPROVING"</text></inputEntry>
+        <inputEntry id="r07_i2"><text>true</text></inputEntry>
+        <inputEntry id="r07_i3"><text>false</text></inputEntry>
+        <outputEntry id="r07_o1"><text>false</text></outputEntry>
+        <outputEntry id="r07_o2"><text>"Abnormal lab results. Review required."</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+</definitions>

@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: healthcare-treatment-service
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/healthcare_journey
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema. `validate` makes any drift between the migrations and the
+      # entities fail at startup instead of Hibernate silently altering production tables.
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+camunda:
+  client:
+    mode: saas
+    auth:
+      # Supplied from the environment — never committed. See README for the export lines.
+      client-id: ${CAMUNDA_CLIENT_ID}
+      client-secret: ${CAMUNDA_CLIENT_SECRET}
+    cloud:
+      cluster-id: ${CAMUNDA_CLUSTER_ID}
+      region: ${CAMUNDA_REGION:sin-1}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.aaseya.healthcare: DEBUG
+    com.aaseya.camunda.framework: INFO
+    io.camunda: INFO

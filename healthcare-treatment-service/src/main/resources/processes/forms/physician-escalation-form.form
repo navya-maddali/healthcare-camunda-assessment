@@ -1,0 +1,23 @@
+{
+  "executionPlatform": "Camunda Cloud",
+  "executionPlatformVersion": "8.9.0",
+  "exporter": { "name": "healthcare-treatment-service", "version": "1.0.0" },
+  "id": "physician-escalation-form",
+  "type": "default",
+  "components": [
+    { "type": "textfield", "id": "e1", "label": "Patient Name", "key": "patientName", "readonly": true },
+    { "type": "textfield", "id": "e2", "label": "Case ID", "key": "caseId", "readonly": true },
+    { "type": "textfield", "id": "e3", "label": "Failed Test Type", "key": "testType", "readonly": true },
+    { "type": "textarea", "id": "e4", "label": "Escalation Notes", "key": "escalationNotes", "validate": { "required": true } },
+    {
+      "type": "select", "id": "e5", "label": "Action Taken", "key": "escalationAction",
+      "validate": { "required": true },
+      "values": [
+        { "label": "Retry diagnostics once system is restored", "value": "RETRY" },
+        { "label": "Proceed on clinical judgement without this test", "value": "PROCEED" },
+        { "label": "Transfer patient to another facility", "value": "TRANSFER" }
+      ]
+    },
+    { "type": "checkbox", "id": "e6", "label": "Diagnostics team notified", "key": "diagnosticsTeamNotified", "validate": { "required": true } }
+  ]
+}

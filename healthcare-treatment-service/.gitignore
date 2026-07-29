@@ -1,0 +1,25 @@
+# Build output
+target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local environment — credentials must never be committed.
+# Camunda client id/secret and cluster id are read from environment variables
+# (see README); keep them in an untracked file such as this one.
+.env
+*.local.yml
+
+# Scratch output from manual API calls. Never put these under src/main/resources —
+# anything there is packaged into the jar.
+*.log
+scratch/

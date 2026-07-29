@@ -1,0 +1,24 @@
+{
+  "executionPlatform": "Camunda Cloud",
+  "executionPlatformVersion": "8.9.0",
+  "exporter": { "name": "healthcare-treatment-service", "version": "1.0.0" },
+  "id": "clinical-director-form",
+  "type": "default",
+  "components": [
+    { "type": "textfield", "id": "d1", "label": "Patient Name", "key": "patientName", "readonly": true },
+    { "type": "textfield", "id": "d2", "label": "Failed Discharge Attempts", "key": "dischargeAttemptCount", "readonly": true },
+    { "type": "textarea", "id": "d3", "label": "Current Treatment Plan", "key": "treatmentPlan", "readonly": true },
+    { "type": "textfield", "id": "d4", "label": "Latest Vitals Trend", "key": "vitalsTrend", "readonly": true },
+    { "type": "textarea", "id": "d5", "label": "Director Review Notes", "key": "directorNotes", "validate": { "required": true } },
+    {
+      "type": "select", "id": "d6", "label": "Direction", "key": "directorDecision",
+      "validate": { "required": true },
+      "values": [
+        { "label": "Continue treatment with revised plan", "value": "CONTINUE" },
+        { "label": "Escalate to specialist review", "value": "ESCALATE" },
+        { "label": "Transfer to intensive care", "value": "TRANSFER_ICU" }
+      ]
+    },
+    { "type": "checkbox", "id": "d7", "label": "Attempt counter reset approved", "key": "counterResetApproved", "validate": { "required": true } }
+  ]
+}

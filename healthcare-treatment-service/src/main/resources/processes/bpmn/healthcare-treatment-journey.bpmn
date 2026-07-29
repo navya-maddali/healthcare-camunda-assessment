@@ -1,0 +1,700 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:modeler="http://camunda.org/schema/modeler/1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" id="Definitions_healthcare" targetNamespace="http://bpmn.io/schema/bpmn" exporter="Camunda Web Modeler" exporterVersion="aeb6083" modeler:executionPlatform="Camunda Cloud" modeler:executionPlatformVersion="8.9.0">
+  <bpmn:error id="Error_DiagSystem" name="Diagnostic System Unavailable" errorCode="DIAGNOSTIC_SYSTEM_UNAVAILABLE" />
+  <bpmn:message id="Message_VitalsAlert" name="VitalsAlert">
+    <bpmn:extensionElements>
+      <!-- Correlates on caseId, which the vitals worker passes as the message correlation key. -->
+      <zeebe:subscription correlationKey="=caseId" />
+    </bpmn:extensionElements>
+  </bpmn:message>
+  <bpmn:process id="healthcare-treatment-journey" name="Healthcare Treatment Journey" isExecutable="true">
+    <bpmn:startEvent id="StartEvent_1" name="Patient Admitted">
+      <bpmn:outgoing>Flow_1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="Task_Registration" name="Registration and Consent">
+      <bpmn:extensionElements>
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="registration-desk" />
+        <zeebe:formDefinition formId="registration-form" />
+        <zeebe:ioMapping>
+          <!-- Enables the framework's idempotency guard for the rest of the journey. -->
+          <zeebe:output source="=caseId" target="businessKey" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_1</bpmn:incoming>
+      <bpmn:outgoing>Flow_2</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:serviceTask id="Task_HistorySummary" name="Summarize History (AI)">
+      <bpmn:extensionElements>
+        <!--
+          AI Connector step 1 of 2. The OpenAI connector is built on the HTTP-JSON connector,
+          so the job type is io.camunda:http-json:1 (element template io.camunda.connectors.OpenAI.v1).
+          Failure handling: bounded retries plus an explicit connection timeout, so a hanging
+          model call surfaces as an incident rather than blocking the journey indefinitely.
+          Requires an OPENAI_API_KEY secret in Camunda Console.
+        -->
+        <zeebe:taskDefinition type="io.camunda:http-json:1" retries="2" />
+        <zeebe:ioMapping>
+          <zeebe:input source="bearer" target="authentication.type" />
+          <zeebe:input source="{{secrets.OPENAI_API_KEY}}" target="authentication.token" />
+          <zeebe:input source="POST" target="method" />
+          <zeebe:input source="https://api.openai.com/v1/chat/completions" target="url" />
+          <zeebe:input source="=20" target="connectionTimeoutInSeconds" />
+          <zeebe:input source="={&#34;Content-Type&#34;: &#34;application/json&#34;}" target="headers" />
+          <zeebe:input source="={model: &#34;gpt-4o-mini&#34;, temperature: 0.2, messages: [{role: &#34;system&#34;, content: &#34;You are a clinical documentation assistant. Produce a concise, factual prior-history summary of at most 80 words. State only what the input supports; never invent findings.&#34;}, {role: &#34;user&#34;, content: &#34;Patient &#34; + patientName + &#34; (ID &#34; + patientId + &#34;) was admitted via &#34; + admissionType + &#34; with chief complaint &#34; + chiefComplaint + &#34;. Summarise relevant prior history, known allergies and clinical status on admission.&#34;}]}" target="body" />
+          <zeebe:output source="=response.body.choices[1].message.content" target="historySummary" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_2</bpmn:incoming>
+      <bpmn:outgoing>Flow_3</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:businessRuleTask id="Task_Triage" name="Triage and Care Pathway">
+      <bpmn:extensionElements>
+        <zeebe:calledDecision decisionId="triage-care-pathway" resultVariable="triageResult" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=triageResult.carePlan" target="carePlan" />
+          <zeebe:output source="=triageResult.diagnosticTests" target="diagnosticTests" />
+          <zeebe:output source="=triageResult.priority" target="priority" />
+          <zeebe:output source="=triageResult.assignedWard" target="assignedWard" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_3</bpmn:incoming>
+      <bpmn:outgoing>Flow_4</bpmn:outgoing>
+    </bpmn:businessRuleTask>
+    <bpmn:subProcess id="SubProcess_Diagnostics" name="Parallel Diagnostics">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:input source="=patientId" target="patientId" />
+          <zeebe:input source="=caseId" target="caseId" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_4</bpmn:incoming>
+      <bpmn:outgoing>Flow_5</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics>
+        <bpmn:extensionElements>
+          <!--
+            Sourced from `diagnosticTests`, not `triageResult.diagnosticTests`. Task_Triage has
+            output mappings, so only the mapped targets propagate out of its scope; the raw
+            `triageResult` result variable is consumed there and does not exist here.
+          -->
+          <zeebe:loopCharacteristics inputCollection="=diagnosticTests" inputElement="testType" />
+        </bpmn:extensionElements>
+      </bpmn:multiInstanceLoopCharacteristics>
+      <bpmn:startEvent id="SubDiag_Start">
+        <bpmn:outgoing>SubFlow_D1</bpmn:outgoing>
+      </bpmn:startEvent>
+      <bpmn:exclusiveGateway id="Gateway_CardioCheck" name="Cardiology workup?">
+        <bpmn:incoming>SubFlow_D1</bpmn:incoming>
+        <bpmn:outgoing>SubFlow_IsCardio</bpmn:outgoing>
+        <bpmn:outgoing>SubFlow_IsLab</bpmn:outgoing>
+      </bpmn:exclusiveGateway>
+      <bpmn:userTask id="Task_CardiologyWorkup" name="Cardiology Workup">
+        <bpmn:extensionElements>
+          <zeebe:userTask />
+          <zeebe:assignmentDefinition candidateGroups="diagnostics-technician" />
+          <zeebe:formDefinition formId="cardiology-workup-form" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>SubFlow_IsCardio</bpmn:incoming>
+        <bpmn:outgoing>SubFlow_CardioJoin</bpmn:outgoing>
+      </bpmn:userTask>
+      <bpmn:serviceTask id="Task_OrderTest" name="Order Lab Test">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="lab-test-ordering" retries="3" />
+          <zeebe:ioMapping>
+            <zeebe:input source="=patientId" target="patientId" />
+            <zeebe:input source="=testType" target="testType" />
+            <zeebe:input source="=caseId" target="caseId" />
+            <!--
+              Idempotency key is per test, not per case: each multi-instance branch orders a
+              different test, so keying on caseId alone would make the framework's guard treat
+              the second branch as a replay and skip it.
+            -->
+            <zeebe:input source="=caseId + &#34;-&#34; + testType" target="businessKey" />
+            <!-- Drives the exception path; defaults to false when the variable is absent. -->
+            <zeebe:input source="=if (diagnosticSystemDown = null) then false else diagnosticSystemDown" target="diagnosticSystemDown" />
+            <zeebe:output source="=orderId" target="orderId" />
+            <zeebe:output source="=testStatus" target="testStatus" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>SubFlow_IsLab</bpmn:incoming>
+        <bpmn:outgoing>SubFlow_ToIngest</bpmn:outgoing>
+      </bpmn:serviceTask>
+      <bpmn:serviceTask id="Task_IngestResult" name="Ingest Test Result">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="lab-result-ingestion" retries="3" />
+          <zeebe:ioMapping>
+            <zeebe:input source="=orderId" target="orderId" />
+            <zeebe:input source="=testType" target="testType" />
+            <zeebe:input source="=caseId" target="caseId" />
+            <zeebe:input source="=caseId + &#34;-result-&#34; + testType" target="businessKey" />
+            <zeebe:output source="=testResult" target="testResult" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>SubFlow_ToIngest</bpmn:incoming>
+        <bpmn:outgoing>SubFlow_LabJoin</bpmn:outgoing>
+      </bpmn:serviceTask>
+      <bpmn:exclusiveGateway id="Gateway_DiagJoin">
+        <bpmn:incoming>SubFlow_CardioJoin</bpmn:incoming>
+        <bpmn:incoming>SubFlow_LabJoin</bpmn:incoming>
+        <bpmn:outgoing>SubFlow_DiagEnd</bpmn:outgoing>
+      </bpmn:exclusiveGateway>
+      <bpmn:endEvent id="SubDiag_End">
+        <bpmn:incoming>SubFlow_DiagEnd</bpmn:incoming>
+      </bpmn:endEvent>
+      <bpmn:sequenceFlow id="SubFlow_D1" sourceRef="SubDiag_Start" targetRef="Gateway_CardioCheck" />
+      <bpmn:sequenceFlow id="SubFlow_IsCardio" name="Cardiology" sourceRef="Gateway_CardioCheck" targetRef="Task_CardiologyWorkup">
+        <bpmn:conditionExpression>=testType = "CARDIOLOGY_WORKUP"</bpmn:conditionExpression>
+      </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="SubFlow_IsLab" name="Lab / Imaging" sourceRef="Gateway_CardioCheck" targetRef="Task_OrderTest">
+        <bpmn:conditionExpression>=testType != "CARDIOLOGY_WORKUP"</bpmn:conditionExpression>
+      </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="SubFlow_CardioJoin" sourceRef="Task_CardiologyWorkup" targetRef="Gateway_DiagJoin" />
+      <bpmn:sequenceFlow id="SubFlow_ToIngest" sourceRef="Task_OrderTest" targetRef="Task_IngestResult" />
+      <bpmn:sequenceFlow id="SubFlow_LabJoin" sourceRef="Task_IngestResult" targetRef="Gateway_DiagJoin" />
+      <bpmn:sequenceFlow id="SubFlow_DiagEnd" sourceRef="Gateway_DiagJoin" targetRef="SubDiag_End" />
+    </bpmn:subProcess>
+    <bpmn:boundaryEvent id="BoundaryError_Diag" name="System Down" attachedToRef="SubProcess_Diagnostics">
+      <bpmn:outgoing>Flow_Err1</bpmn:outgoing>
+      <bpmn:errorEventDefinition id="ErrDef_1" errorRef="Error_DiagSystem" />
+    </bpmn:boundaryEvent>
+    <bpmn:userTask id="Task_EscalatePhysician" name="Escalate to Physician">
+      <bpmn:extensionElements>
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="attending-physician" />
+        <zeebe:formDefinition formId="physician-escalation-form" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_Err1</bpmn:incoming>
+      <bpmn:outgoing>Flow_Err2</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:endEvent id="ErrEnd_1" name="Escalation End">
+      <bpmn:incoming>Flow_Err2</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_Err1" sourceRef="BoundaryError_Diag" targetRef="Task_EscalatePhysician" />
+    <bpmn:sequenceFlow id="Flow_Err2" sourceRef="Task_EscalatePhysician" targetRef="ErrEnd_1" />
+    <bpmn:userTask id="Task_TreatmentPlan" name="Define Treatment Plan">
+      <bpmn:extensionElements>
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="attending-physician" />
+        <zeebe:formDefinition formId="treatment-plan-form" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_5</bpmn:incoming>
+      <bpmn:incoming>Flow_TryAgain</bpmn:incoming>
+      <bpmn:incoming>Flow_ClinDir_Back</bpmn:incoming>
+      <bpmn:outgoing>Flow_6</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:exclusiveGateway id="Gateway_Consults" name="Consults needed?">
+      <bpmn:incoming>Flow_6</bpmn:incoming>
+      <bpmn:outgoing>Flow_7_Yes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_7_No</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:adHocSubProcess id="AdHoc_Consultations" name="Specialist Consultations" ordering="Parallel" cancelRemainingInstances="false">
+      <bpmn:incoming>Flow_7_Yes</bpmn:incoming>
+      <bpmn:outgoing>Flow_8</bpmn:outgoing>
+      <bpmn:userTask id="Task_NeurologyConsult" name="Neurology Consult">
+        <bpmn:extensionElements>
+          <zeebe:userTask />
+          <zeebe:assignmentDefinition candidateGroups="neuro-specialist" />
+          <zeebe:formDefinition formId="specialist-consult-form" />
+        </bpmn:extensionElements>
+      </bpmn:userTask>
+      <bpmn:userTask id="Task_EndoConsult" name="Endocrinology Consult">
+        <bpmn:extensionElements>
+          <zeebe:userTask />
+          <zeebe:assignmentDefinition candidateGroups="endo-specialist" />
+          <zeebe:formDefinition formId="specialist-consult-form" />
+        </bpmn:extensionElements>
+      </bpmn:userTask>
+      <bpmn:userTask id="Task_PhysioConsult" name="Physiotherapy Consult">
+        <bpmn:extensionElements>
+          <zeebe:userTask />
+          <zeebe:assignmentDefinition candidateGroups="physio-specialist" />
+          <zeebe:formDefinition formId="specialist-consult-form" />
+        </bpmn:extensionElements>
+      </bpmn:userTask>
+      <!--
+        The physician activates only the consults a patient needs at runtime; the stage ends
+        when the round is marked complete rather than when a fixed set of tasks finishes.
+        cancelRemainingInstances="false" lets consults already in flight finish normally.
+        Per the BPMN schema, completionCondition must follow the child flow elements.
+      -->
+      <bpmn:completionCondition xsi:type="bpmn:tFormalExpression">=consultsComplete = true</bpmn:completionCondition>
+    </bpmn:adHocSubProcess>
+    <bpmn:subProcess id="SubProcess_Treatment" name="Treatment Execution">
+      <bpmn:incoming>Flow_7_No</bpmn:incoming>
+      <bpmn:incoming>Flow_8</bpmn:incoming>
+      <bpmn:outgoing>Flow_9</bpmn:outgoing>
+      <bpmn:startEvent id="SubTreat_Start">
+        <bpmn:outgoing>SubTreat_F1</bpmn:outgoing>
+      </bpmn:startEvent>
+      <bpmn:userTask id="Task_TreatmentAdmin" name="Treatment Administration">
+        <bpmn:extensionElements>
+          <zeebe:userTask />
+          <zeebe:assignmentDefinition candidateGroups="nurse" />
+          <!--
+            This form is what supplies treatmentStepsCompleted and labResultsNormal. Without
+            them the discharge-readiness decision matches no rule and returns null, and the
+            readiness gateway then fails on dischargeResult.dischargeReady.
+          -->
+          <zeebe:formDefinition formId="treatment-admin-form" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>SubTreat_F1</bpmn:incoming>
+        <bpmn:outgoing>SubTreat_F2</bpmn:outgoing>
+      </bpmn:userTask>
+      <bpmn:serviceTask id="Task_VitalsMonitor" name="Monitor Vitals">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="vitals-monitoring" retries="3" />
+          <zeebe:ioMapping>
+            <zeebe:input source="=patientId" target="patientId" />
+            <zeebe:input source="=caseId" target="caseId" />
+            <zeebe:output source="=vitalsTrend" target="vitalsTrend" />
+            <zeebe:output source="=vitalsAlertRaised" target="vitalsAlertRaised" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>SubTreat_F2</bpmn:incoming>
+        <bpmn:outgoing>SubTreat_F3</bpmn:outgoing>
+      </bpmn:serviceTask>
+      <bpmn:endEvent id="SubTreat_End">
+        <bpmn:incoming>SubTreat_F3</bpmn:incoming>
+      </bpmn:endEvent>
+      <bpmn:subProcess id="EventSubProcess_VitalsAlert" name="Vitals Alert Handler" triggeredByEvent="true">
+        <bpmn:startEvent id="MsgStart_VitalsAlert" name="Vitals Alert" isInterrupting="false">
+          <bpmn:outgoing>VitalsAlert_F1</bpmn:outgoing>
+          <bpmn:messageEventDefinition id="MsgDef_Vitals" messageRef="Message_VitalsAlert" />
+        </bpmn:startEvent>
+        <bpmn:serviceTask id="Task_HandleAlert" name="Handle Vitals Alert">
+          <bpmn:extensionElements>
+            <zeebe:taskDefinition type="vitals-alert-handler" retries="1" />
+            <zeebe:ioMapping>
+              <zeebe:input source="=alertMessage" target="alertMessage" />
+              <zeebe:input source="=vitalsTrend" target="vitalsTrend" />
+            </zeebe:ioMapping>
+          </bpmn:extensionElements>
+          <bpmn:incoming>VitalsAlert_F1</bpmn:incoming>
+          <bpmn:outgoing>VitalsAlert_F2</bpmn:outgoing>
+        </bpmn:serviceTask>
+        <bpmn:endEvent id="VitalsAlert_End">
+          <bpmn:incoming>VitalsAlert_F2</bpmn:incoming>
+        </bpmn:endEvent>
+        <bpmn:sequenceFlow id="VitalsAlert_F1" sourceRef="MsgStart_VitalsAlert" targetRef="Task_HandleAlert" />
+        <bpmn:sequenceFlow id="VitalsAlert_F2" sourceRef="Task_HandleAlert" targetRef="VitalsAlert_End" />
+      </bpmn:subProcess>
+      <bpmn:sequenceFlow id="SubTreat_F1" sourceRef="SubTreat_Start" targetRef="Task_TreatmentAdmin" />
+      <bpmn:sequenceFlow id="SubTreat_F2" sourceRef="Task_TreatmentAdmin" targetRef="Task_VitalsMonitor" />
+      <bpmn:sequenceFlow id="SubTreat_F3" sourceRef="Task_VitalsMonitor" targetRef="SubTreat_End" />
+    </bpmn:subProcess>
+    <bpmn:businessRuleTask id="Task_DischargeReady" name="Check Discharge Readiness">
+      <bpmn:extensionElements>
+        <zeebe:calledDecision decisionId="discharge-readiness" resultVariable="dischargeResult" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_9</bpmn:incoming>
+      <bpmn:outgoing>Flow_10</bpmn:outgoing>
+    </bpmn:businessRuleTask>
+    <bpmn:exclusiveGateway id="Gateway_Ready" name="Ready for discharge?">
+      <bpmn:incoming>Flow_10</bpmn:incoming>
+      <bpmn:outgoing>Flow_ReadyYes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_NotReady</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:scriptTask id="Task_IncrementCounter" name="Increment Attempt Count">
+      <bpmn:extensionElements>
+        <zeebe:script expression="=if dischargeAttemptCount = null then 1 else dischargeAttemptCount + 1" resultVariable="dischargeAttemptCount" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_NotReady</bpmn:incoming>
+      <bpmn:outgoing>Flow_CheckMax</bpmn:outgoing>
+    </bpmn:scriptTask>
+    <bpmn:exclusiveGateway id="Gateway_MaxAttempts" name="Over 3 attempts?">
+      <bpmn:incoming>Flow_CheckMax</bpmn:incoming>
+      <bpmn:outgoing>Flow_Escalate</bpmn:outgoing>
+      <bpmn:outgoing>Flow_TryAgain</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="Task_ClinDirectorReview" name="Clinical Director Review">
+      <bpmn:extensionElements>
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="clinical-director" />
+        <zeebe:formDefinition formId="clinical-director-form" />
+        <zeebe:ioMapping>
+          <!--
+            Resets the attempt counter. Without this the counter stays above the threshold and
+            the escalate -> revise -> escalate path never terminates.
+          -->
+          <zeebe:output source="=0" target="dischargeAttemptCount" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_Escalate</bpmn:incoming>
+      <bpmn:outgoing>Flow_ClinDir_Back</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:serviceTask id="Task_DischargeSummary" name="Draft Discharge Summary (AI)">
+      <bpmn:extensionElements>
+        <!--
+          AI Connector step 2 of 2. Prompt is built from the variables produced earlier in the
+          journey (triage care plan, physician's treatment plan, monitored vitals trend and the
+          admission history summary), which is what makes this a process-aware AI step rather
+          than a static template.
+        -->
+        <zeebe:taskDefinition type="io.camunda:http-json:1" retries="2" />
+        <zeebe:ioMapping>
+          <zeebe:input source="bearer" target="authentication.type" />
+          <zeebe:input source="{{secrets.OPENAI_API_KEY}}" target="authentication.token" />
+          <zeebe:input source="POST" target="method" />
+          <zeebe:input source="https://api.openai.com/v1/chat/completions" target="url" />
+          <zeebe:input source="=20" target="connectionTimeoutInSeconds" />
+          <zeebe:input source="={&#34;Content-Type&#34;: &#34;application/json&#34;}" target="headers" />
+          <zeebe:input source="={model: &#34;gpt-4o-mini&#34;, temperature: 0.2, messages: [{role: &#34;system&#34;, content: &#34;You are a clinical documentation assistant. Draft a discharge summary followed by a HOME CARE section as short bullet points. Be factual and use only the supplied details.&#34;}, {role: &#34;user&#34;, content: &#34;Patient: &#34; + patientName + &#34;. Care plan: &#34; + carePlan + &#34;. Treatment administered: &#34; + treatmentPlan + &#34;. Final vitals trend: &#34; + vitalsTrend + &#34;. Admission history: &#34; + historySummary + &#34;.&#34;}]}" target="body" />
+          <zeebe:output source="=response.body.choices[1].message.content" target="dischargeSummary" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_ReadyYes</bpmn:incoming>
+      <bpmn:outgoing>Flow_11</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:userTask id="Task_DischargeSignoff" name="Discharge Sign-off">
+      <bpmn:extensionElements>
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="attending-physician" />
+        <zeebe:formDefinition formId="discharge-form" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_11</bpmn:incoming>
+      <bpmn:outgoing>Flow_12</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:serviceTask id="Task_Archive" name="Save to Database">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="record-archiving" retries="3" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=caseId" target="caseId" />
+          <zeebe:input source="=patientId" target="patientId" />
+          <zeebe:input source="=patientName" target="patientName" />
+          <zeebe:input source="=carePlan" target="carePlan" />
+          <zeebe:input source="=treatmentPlan" target="treatmentPlan" />
+          <zeebe:input source="=dischargeSummary" target="dischargeSummary" />
+          <zeebe:input source="=vitalsTrend" target="vitalsTrend" />
+          <zeebe:output source="=archiveReferenceId" target="archiveReferenceId" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_12</bpmn:incoming>
+      <bpmn:outgoing>Flow_13</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="EndEvent_1" name="Patient Discharged">
+      <bpmn:incoming>Flow_13</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_1" sourceRef="StartEvent_1" targetRef="Task_Registration" />
+    <bpmn:sequenceFlow id="Flow_2" sourceRef="Task_Registration" targetRef="Task_HistorySummary" />
+    <bpmn:sequenceFlow id="Flow_3" sourceRef="Task_HistorySummary" targetRef="Task_Triage" />
+    <bpmn:sequenceFlow id="Flow_4" sourceRef="Task_Triage" targetRef="SubProcess_Diagnostics" />
+    <bpmn:sequenceFlow id="Flow_5" sourceRef="SubProcess_Diagnostics" targetRef="Task_TreatmentPlan" />
+    <bpmn:sequenceFlow id="Flow_6" sourceRef="Task_TreatmentPlan" targetRef="Gateway_Consults" />
+    <bpmn:sequenceFlow id="Flow_7_Yes" name="Yes" sourceRef="Gateway_Consults" targetRef="AdHoc_Consultations">
+      <bpmn:conditionExpression>=consultsRequired = true</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_7_No" name="No" sourceRef="Gateway_Consults" targetRef="SubProcess_Treatment">
+      <bpmn:conditionExpression>=consultsRequired = false</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_8" sourceRef="AdHoc_Consultations" targetRef="SubProcess_Treatment" />
+    <bpmn:sequenceFlow id="Flow_9" sourceRef="SubProcess_Treatment" targetRef="Task_DischargeReady" />
+    <bpmn:sequenceFlow id="Flow_10" sourceRef="Task_DischargeReady" targetRef="Gateway_Ready" />
+    <bpmn:sequenceFlow id="Flow_ReadyYes" name="Ready" sourceRef="Gateway_Ready" targetRef="Task_DischargeSummary">
+      <bpmn:conditionExpression>=dischargeResult.dischargeReady = true</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_NotReady" name="Not ready" sourceRef="Gateway_Ready" targetRef="Task_IncrementCounter">
+      <bpmn:conditionExpression>=dischargeResult.dischargeReady = false</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_CheckMax" sourceRef="Task_IncrementCounter" targetRef="Gateway_MaxAttempts" />
+    <bpmn:sequenceFlow id="Flow_Escalate" name="Over 3 attempts" sourceRef="Gateway_MaxAttempts" targetRef="Task_ClinDirectorReview">
+      <bpmn:conditionExpression>=dischargeAttemptCount &gt; 3</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_TryAgain" name="Try again" sourceRef="Gateway_MaxAttempts" targetRef="Task_TreatmentPlan">
+      <bpmn:conditionExpression>=dischargeAttemptCount &lt;= 3</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_ClinDir_Back" sourceRef="Task_ClinDirectorReview" targetRef="Task_TreatmentPlan" />
+    <bpmn:sequenceFlow id="Flow_11" sourceRef="Task_DischargeSummary" targetRef="Task_DischargeSignoff" />
+    <bpmn:sequenceFlow id="Flow_12" sourceRef="Task_DischargeSignoff" targetRef="Task_Archive" />
+    <bpmn:sequenceFlow id="Flow_13" sourceRef="Task_Archive" targetRef="EndEvent_1" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="healthcare-treatment-journey">
+      <bpmndi:BPMNShape id="StartEvent_1_di" bpmnElement="StartEvent_1">
+        <dc:Bounds x="100" y="282" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="76" y="325" width="85" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Registration_di" bpmnElement="Task_Registration">
+        <dc:Bounds x="188" y="260" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_HistorySummary_di" bpmnElement="Task_HistorySummary">
+        <dc:Bounds x="390" y="260" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Triage_di" bpmnElement="Task_Triage">
+        <dc:Bounds x="592" y="260" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubProcess_Diagnostics_di" bpmnElement="SubProcess_Diagnostics" isExpanded="true">
+        <dc:Bounds x="794" y="120" width="560" height="400" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubDiag_Start_di" bpmnElement="SubDiag_Start">
+        <dc:Bounds x="834" y="282" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_CardioCheck_di" bpmnElement="Gateway_CardioCheck" isMarkerVisible="true">
+        <dc:Bounds x="929" y="275" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="912" y="332" width="84" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_CardiologyWorkup_di" bpmnElement="Task_CardiologyWorkup">
+        <dc:Bounds x="1030" y="165" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_OrderTest_di" bpmnElement="Task_OrderTest">
+        <dc:Bounds x="1030" y="330" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_IngestResult_di" bpmnElement="Task_IngestResult">
+        <dc:Bounds x="1030" y="428" width="150" height="60" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_DiagJoin_di" bpmnElement="Gateway_DiagJoin" isMarkerVisible="true">
+        <dc:Bounds x="1245" y="275" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubDiag_End_di" bpmnElement="SubDiag_End">
+        <dc:Bounds x="1316" y="282" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="SubFlow_D1_di" bpmnElement="SubFlow_D1">
+        <di:waypoint x="870" y="300" />
+        <di:waypoint x="929" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubFlow_IsCardio_di" bpmnElement="SubFlow_IsCardio">
+        <di:waypoint x="954" y="275" />
+        <di:waypoint x="954" y="205" />
+        <di:waypoint x="1030" y="205" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubFlow_IsLab_di" bpmnElement="SubFlow_IsLab">
+        <di:waypoint x="954" y="325" />
+        <di:waypoint x="954" y="370" />
+        <di:waypoint x="1030" y="370" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubFlow_CardioJoin_di" bpmnElement="SubFlow_CardioJoin">
+        <di:waypoint x="1180" y="205" />
+        <di:waypoint x="1270" y="205" />
+        <di:waypoint x="1270" y="275" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubFlow_ToIngest_di" bpmnElement="SubFlow_ToIngest">
+        <di:waypoint x="1105" y="410" />
+        <di:waypoint x="1105" y="428" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubFlow_LabJoin_di" bpmnElement="SubFlow_LabJoin">
+        <di:waypoint x="1180" y="458" />
+        <di:waypoint x="1270" y="458" />
+        <di:waypoint x="1270" y="325" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubFlow_DiagEnd_di" bpmnElement="SubFlow_DiagEnd">
+        <di:waypoint x="1295" y="300" />
+        <di:waypoint x="1316" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNShape id="Task_EscalatePhysician_di" bpmnElement="Task_EscalatePhysician">
+        <dc:Bounds x="1030" y="570" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ErrEnd_1_di" bpmnElement="ErrEnd_1">
+        <dc:Bounds x="1262" y="592" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_TreatmentPlan_di" bpmnElement="Task_TreatmentPlan">
+        <dc:Bounds x="1406" y="260" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_Consults_di" bpmnElement="Gateway_Consults" isMarkerVisible="true">
+        <dc:Bounds x="1611" y="275" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1593" y="332" width="87" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="AdHoc_Consultations_di" bpmnElement="AdHoc_Consultations" isExpanded="true">
+        <dc:Bounds x="1711" y="120" width="380" height="230" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_NeurologyConsult_di" bpmnElement="Task_NeurologyConsult">
+        <dc:Bounds x="1731" y="140" width="130" height="60" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_EndoConsult_di" bpmnElement="Task_EndoConsult">
+        <dc:Bounds x="1881" y="140" width="130" height="60" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_PhysioConsult_di" bpmnElement="Task_PhysioConsult">
+        <dc:Bounds x="1806" y="250" width="130" height="60" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubProcess_Treatment_di" bpmnElement="SubProcess_Treatment" isExpanded="true">
+        <dc:Bounds x="2141" y="120" width="580" height="310" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubTreat_Start_di" bpmnElement="SubTreat_Start">
+        <dc:Bounds x="2181" y="262" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_TreatmentAdmin_di" bpmnElement="Task_TreatmentAdmin">
+        <dc:Bounds x="2261" y="240" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_VitalsMonitor_di" bpmnElement="Task_VitalsMonitor">
+        <dc:Bounds x="2461" y="240" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="SubTreat_End_di" bpmnElement="SubTreat_End">
+        <dc:Bounds x="2663" y="262" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EventSubProcess_VitalsAlert_di" bpmnElement="EventSubProcess_VitalsAlert" isExpanded="true">
+        <dc:Bounds x="2190" y="350" width="430" height="65" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="MsgStart_VitalsAlert_di" bpmnElement="MsgStart_VitalsAlert">
+        <dc:Bounds x="2222" y="363" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2214" y="406" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_HandleAlert_di" bpmnElement="Task_HandleAlert">
+        <dc:Bounds x="2310" y="353" width="130" height="55" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="VitalsAlert_End_di" bpmnElement="VitalsAlert_End">
+        <dc:Bounds x="2494" y="363" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="VitalsAlert_F1_di" bpmnElement="VitalsAlert_F1">
+        <di:waypoint x="2258" y="381" />
+        <di:waypoint x="2310" y="381" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="VitalsAlert_F2_di" bpmnElement="VitalsAlert_F2">
+        <di:waypoint x="2440" y="381" />
+        <di:waypoint x="2494" y="381" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubTreat_F1_di" bpmnElement="SubTreat_F1">
+        <di:waypoint x="2217" y="280" />
+        <di:waypoint x="2261" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubTreat_F2_di" bpmnElement="SubTreat_F2">
+        <di:waypoint x="2411" y="280" />
+        <di:waypoint x="2461" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubTreat_F3_di" bpmnElement="SubTreat_F3">
+        <di:waypoint x="2611" y="280" />
+        <di:waypoint x="2663" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNShape id="Task_DischargeReady_di" bpmnElement="Task_DischargeReady">
+        <dc:Bounds x="2781" y="260" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_Ready_di" bpmnElement="Gateway_Ready" isMarkerVisible="true">
+        <dc:Bounds x="2986" y="275" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="2966" y="332" width="90" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_IncrementCounter_di" bpmnElement="Task_IncrementCounter">
+        <dc:Bounds x="2961" y="440" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_MaxAttempts_di" bpmnElement="Gateway_MaxAttempts" isMarkerVisible="true">
+        <dc:Bounds x="3161" y="455" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3144" y="512" width="84" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_ClinDirectorReview_di" bpmnElement="Task_ClinDirectorReview">
+        <dc:Bounds x="3261" y="440" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_DischargeSummary_di" bpmnElement="Task_DischargeSummary">
+        <dc:Bounds x="3086" y="260" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_DischargeSignoff_di" bpmnElement="Task_DischargeSignoff">
+        <dc:Bounds x="3286" y="260" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Archive_di" bpmnElement="Task_Archive">
+        <dc:Bounds x="3486" y="260" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_1_di" bpmnElement="EndEvent_1">
+        <dc:Bounds x="3688" y="282" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3664" y="325" width="85" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryError_Diag_di" bpmnElement="BoundaryError_Diag">
+        <dc:Bounds x="1058" y="502" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_Err1_di" bpmnElement="Flow_Err1">
+        <di:waypoint x="1076" y="538" />
+        <di:waypoint x="1076" y="570" />
+        <di:waypoint x="1105" y="570" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Err2_di" bpmnElement="Flow_Err2">
+        <di:waypoint x="1180" y="610" />
+        <di:waypoint x="1262" y="610" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_1_di" bpmnElement="Flow_1">
+        <di:waypoint x="136" y="300" />
+        <di:waypoint x="188" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_2_di" bpmnElement="Flow_2">
+        <di:waypoint x="338" y="300" />
+        <di:waypoint x="390" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_3_di" bpmnElement="Flow_3">
+        <di:waypoint x="540" y="300" />
+        <di:waypoint x="592" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_4_di" bpmnElement="Flow_4">
+        <di:waypoint x="742" y="300" />
+        <di:waypoint x="794" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_5_di" bpmnElement="Flow_5">
+        <di:waypoint x="1354" y="300" />
+        <di:waypoint x="1406" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_6_di" bpmnElement="Flow_6">
+        <di:waypoint x="1556" y="300" />
+        <di:waypoint x="1611" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_7_Yes_di" bpmnElement="Flow_7_Yes">
+        <di:waypoint x="1661" y="300" />
+        <di:waypoint x="1711" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_7_No_di" bpmnElement="Flow_7_No">
+        <di:waypoint x="1636" y="325" />
+        <di:waypoint x="1636" y="480" />
+        <di:waypoint x="2141" y="480" />
+        <di:waypoint x="2141" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_8_di" bpmnElement="Flow_8">
+        <di:waypoint x="2091" y="300" />
+        <di:waypoint x="2141" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_9_di" bpmnElement="Flow_9">
+        <di:waypoint x="2721" y="300" />
+        <di:waypoint x="2781" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_10_di" bpmnElement="Flow_10">
+        <di:waypoint x="2931" y="300" />
+        <di:waypoint x="2986" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ReadyYes_di" bpmnElement="Flow_ReadyYes">
+        <di:waypoint x="3036" y="300" />
+        <di:waypoint x="3086" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_NotReady_di" bpmnElement="Flow_NotReady">
+        <di:waypoint x="3011" y="325" />
+        <di:waypoint x="3011" y="480" />
+        <di:waypoint x="2961" y="480" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_CheckMax_di" bpmnElement="Flow_CheckMax">
+        <di:waypoint x="3111" y="480" />
+        <di:waypoint x="3161" y="480" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Escalate_di" bpmnElement="Flow_Escalate">
+        <di:waypoint x="3211" y="480" />
+        <di:waypoint x="3261" y="480" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_TryAgain_di" bpmnElement="Flow_TryAgain">
+        <di:waypoint x="3186" y="455" />
+        <di:waypoint x="3186" y="90" />
+        <di:waypoint x="1481" y="90" />
+        <di:waypoint x="1481" y="260" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ClinDir_Back_di" bpmnElement="Flow_ClinDir_Back">
+        <di:waypoint x="3336" y="440" />
+        <di:waypoint x="3336" y="-170" />
+        <di:waypoint x="1440" y="-170" />
+        <di:waypoint x="1440" y="260" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_11_di" bpmnElement="Flow_11">
+        <di:waypoint x="3236" y="300" />
+        <di:waypoint x="3286" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_12_di" bpmnElement="Flow_12">
+        <di:waypoint x="3436" y="300" />
+        <di:waypoint x="3486" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_13_di" bpmnElement="Flow_13">
+        <di:waypoint x="3636" y="300" />
+        <di:waypoint x="3688" y="300" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
