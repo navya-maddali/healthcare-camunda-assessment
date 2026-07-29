@@ -34,6 +34,15 @@
           Requires an OPENAI_API_TOKEN secret in Camunda Console.
         -->
         <zeebe:taskDefinition type="io.camunda:http-json:1" retries="2" />
+        <!--
+          Publishes the connector's response under a variable the output mapping can read.
+          Without it the job completes carrying no `response`, so `=response.body...` resolves
+          against nothing and FEEL yields null — the task looks successful while producing no
+          summary at all.
+        -->
+        <zeebe:taskHeaders>
+          <zeebe:header key="resultVariable" value="response" />
+        </zeebe:taskHeaders>
         <zeebe:ioMapping>
           <zeebe:input source="bearer" target="authentication.type" />
           <zeebe:input source="{{secrets.OPENAI_API_TOKEN}}" target="authentication.token" />
@@ -332,6 +341,15 @@
           than a static template.
         -->
         <zeebe:taskDefinition type="io.camunda:http-json:1" retries="2" />
+        <!--
+          Publishes the connector's response under a variable the output mapping can read.
+          Without it the job completes carrying no `response`, so `=response.body...` resolves
+          against nothing and FEEL yields null — the task looks successful while producing no
+          summary at all.
+        -->
+        <zeebe:taskHeaders>
+          <zeebe:header key="resultVariable" value="response" />
+        </zeebe:taskHeaders>
         <zeebe:ioMapping>
           <zeebe:input source="bearer" target="authentication.type" />
           <zeebe:input source="{{secrets.OPENAI_API_TOKEN}}" target="authentication.token" />
