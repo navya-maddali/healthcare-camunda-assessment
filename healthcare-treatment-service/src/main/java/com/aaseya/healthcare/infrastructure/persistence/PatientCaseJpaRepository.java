@@ -1,5 +1,6 @@
 package com.aaseya.healthcare.infrastructure.persistence;
 
+import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 /**
@@ -15,4 +16,10 @@ public interface PatientCaseJpaRepository extends JpaRepository<PatientCaseEntit
      * @return {@code true} when a record already exists for this case
      */
     boolean existsByCaseId(String caseId);
+
+    /**
+     * @param caseId business key of the admission
+     * @return the archived row, or empty when the case has not been archived
+     */
+    Optional<PatientCaseEntity> findByCaseId(String caseId);
 }

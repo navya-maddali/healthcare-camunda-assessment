@@ -2,6 +2,7 @@ package com.aaseya.healthcare.infrastructure.persistence;
 
 import com.aaseya.healthcare.application.port.PatientCaseArchive;
 import com.aaseya.healthcare.domain.model.PatientCaseRecord;
+import java.util.Optional;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,5 +38,18 @@ public class JpaPatientCaseArchive implements PatientCaseArchive {
         entity.setDischargeSummary(record.dischargeSummary());
         entity.setVitalsTrend(record.vitalsTrend());
         repository.save(entity);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<PatientCaseRecord> findByCaseId(String caseId) {
+        return repository.findByCaseId(caseId).map(e -> new PatientCaseRecord(
+                e.getCaseId(),
+                e.getPatientId(),
+                e.getPatientName(),
+                e.getCarePlan(),
+                e.getTreatmentPlan(),
+                e.getDischargeSummary(),
+                e.getVitalsTrend()));
     }
 }

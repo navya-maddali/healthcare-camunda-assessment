@@ -6,9 +6,11 @@ import com.aaseya.camunda.framework.core.process.CamundaProcessService;
 import com.aaseya.camunda.framework.core.process.ProcessService;
 import com.aaseya.camunda.framework.starter.camunda.FrameworkCamundaProperties;
 import com.aaseya.healthcare.application.port.PatientCaseArchive;
+import com.aaseya.healthcare.application.port.ProcessOrchestrationPort;
 import com.aaseya.healthcare.application.service.ArchiveCaseUseCase;
 import com.aaseya.healthcare.application.service.LabOrderingUseCase;
 import com.aaseya.healthcare.application.service.LabResultIngestionUseCase;
+import com.aaseya.healthcare.application.service.TreatmentJourneyUseCase;
 import com.aaseya.healthcare.application.service.VitalsMonitoringUseCase;
 import io.camunda.client.CamundaClient;
 import org.springframework.context.annotation.Bean;
@@ -85,5 +87,18 @@ public class WorkerBeansConfig {
     @Bean
     public ArchiveCaseUseCase archiveCaseUseCase(PatientCaseArchive archive) {
         return new ArchiveCaseUseCase(archive);
+    }
+
+    /**
+     * Use case behind the REST API, driving the journey from the service side.
+     *
+     * @param orchestration outbound port to the workflow engine
+     * @param archive       outbound port to the case store
+     * @return use case for starting and steering a treatment journey
+     */
+    @Bean
+    public TreatmentJourneyUseCase treatmentJourneyUseCase(
+            ProcessOrchestrationPort orchestration, PatientCaseArchive archive) {
+        return new TreatmentJourneyUseCase(orchestration, archive);
     }
 }
