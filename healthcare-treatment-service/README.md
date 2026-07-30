@@ -320,5 +320,14 @@ needs JDK 21; check that `JAVA_HOME` points at a JDK that actually exists on the
 
 ## Documents
 
+- [`POSTMAN-TO-OPERATE.md`](POSTMAN-TO-OPERATE.md) — **start here to run it.** Step by step from a
+  cold start through Postman to watching each stage land in Operate and Tasklist.
 - [`DESIGN-NOTE.md`](DESIGN-NOTE.md) — sub-process choices, DMN hit policies, AI prompt design
   and error-handling strategy (assessment deliverable).
+- [`PROJECT-UNDERSTANDING.md`](PROJECT-UNDERSTANDING.md) — what the assessment asks for and where
+  each requirement is implemented.
+- [`RUN-WALKTHROUGH.md`](RUN-WALKTHROUGH.md) — the same journey driven with curl instead of Postman.
+- [`DEMO-SCRIPT.md`](DEMO-SCRIPT.md) — a ~12 minute presented walkthrough, with the point of each beat.
+- [`CHEAT-SHEET.md`](CHEAT-SHEET.md) — one-page reference: endpoints, payloads, task order, flags.
+- [`postman/POSTMAN-RUN.md`](postman/POSTMAN-RUN.md) — running the collection unattended and what
+  each assertion proves.
