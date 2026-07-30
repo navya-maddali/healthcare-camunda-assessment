@@ -9,9 +9,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.ErrorResponse;
+import org.springframework.web.ErrorResponseException;
+import org.springframework.web.HttpMediaTypeException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * Translates failures into a consistent JSON error body.
@@ -105,6 +111,62 @@ public class ApiExceptionHandler {
         LOG.warn("Engine rejected command: {}", ex.getMessage());
         return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                 .body(ApiError.of(HttpStatus.BAD_GATEWAY, "Engine rejected the command: " + ex.getMessage()));
+    }
+
+    /**
+     * Spring MVC failures that already carry their own status.
+     *
+     * <p>An unmapped path raises {@link NoResourceFoundException}, which is a 404 by nature. Left to
+     * the catch-all below it would be reported as a 500, making a caller's typo look like an outage —
+     * the same reasoning applied to engine rejections above.
+     *
+     * <p>The declared types share no common superclass — most extend {@code ServletException} — so
+     * the parameter binds {@link ErrorResponse}, the interface they all implement and the one
+     * carrying the resolved status. {@link HttpMediaTypeException} is the abstract parent of both
+     * the 415 and the 406 cases, so naming it covers each.
+     *
+     * @param ex an MVC failure carrying the status the framework already resolved
+     * @return that status, preserved
+     */
+    @ExceptionHandler({
+        ErrorResponseException.class,
+        NoResourceFoundException.class,
+        HttpRequestMethodNotSupportedException.class,
+        HttpMediaTypeException.class
+    })
+    public ResponseEntity<ApiError> onErrorResponse(ErrorResponse ex) {
+        HttpStatus status = HttpStatus.resolve(ex.getStatusCode().value());
+        if (status == null) {
+            status = HttpStatus.INTERNAL_SERVER_ERROR;
+        }
+
+        // The detail is absent for an unmapped path; the reason phrase is a better answer there than
+        // echoing the internal resource path back to the caller.
+        String message = ex.getBody().getDetail();
+        if (message == null || message.isBlank()) {
+            message = status.getReasonPhrase();
+        }
+
+        LOG.warn("Request failed ({}): {}", status.value(), message);
+        return ResponseEntity.status(status).body(ApiError.of(status, message));
+    }
+
+    /**
+     * Unparseable request body — malformed JSON, or a value of the wrong shape for its field.
+     *
+     * <p>Unlike the MVC failures above this carries no status of its own: it extends
+     * {@code NestedRuntimeException}, so without this handler it reached the catch-all as a 500.
+     * The underlying message names Jackson internals and the target Java types, which is noise to an
+     * API caller, so only the classification is returned.
+     *
+     * @param ex a body the message converters could not read
+     * @return 400, since the fault is in the request
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ApiError> onUnreadableBody(HttpMessageNotReadableException ex) {
+        LOG.warn("Unreadable request body: {}", ex.getMessage());
+        return ResponseEntity.badRequest()
+                .body(ApiError.of(HttpStatus.BAD_REQUEST, "Request body could not be parsed as JSON"));
     }
 
     /**
