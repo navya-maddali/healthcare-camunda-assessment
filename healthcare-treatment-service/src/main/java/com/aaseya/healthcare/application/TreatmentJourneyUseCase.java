@@ -8,7 +8,10 @@ import com.aaseya.healthcare.application.ProcessOrchestrationPort.InstanceState;
 import com.aaseya.healthcare.application.ProcessOrchestrationPort.JourneyIncident;
 import com.aaseya.healthcare.application.ProcessOrchestrationPort.JourneyTask;
 import com.aaseya.healthcare.application.ProcessOrchestrationPort.StartedInstance;
+import com.aaseya.healthcare.domain.CaseTaskOutcomeRecord;
 import com.aaseya.healthcare.domain.PatientCaseRecord;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,22 +38,48 @@ public class TreatmentJourneyUseCase {
 
     private final ProcessOrchestrationPort orchestration;
     private final PatientCaseArchive archive;
+    private final CaseTaskOutcomeArchive outcomes;
+    private final ObjectMapper objectMapper;
 
     /**
      * @param orchestration outbound port to the workflow engine
      * @param archive       outbound port to the case store
+     * @param outcomes      outbound port to the human-step audit trail
+     * @param objectMapper  serialises submitted variables for the audit trail
      */
-    public TreatmentJourneyUseCase(ProcessOrchestrationPort orchestration, PatientCaseArchive archive) {
+    public TreatmentJourneyUseCase(
+            ProcessOrchestrationPort orchestration,
+            PatientCaseArchive archive,
+            CaseTaskOutcomeArchive outcomes,
+            ObjectMapper objectMapper) {
         this.orchestration = orchestration;
         this.archive = archive;
+        this.outcomes = outcomes;
+        this.objectMapper = objectMapper;
     }
 
-    /** Raised when a caller names an element that is not currently waiting. */
+    /** Raised when a caller names an element or task key that is not currently waiting. */
     public static class ElementNotActiveException extends RuntimeException {
         /**
          * @param message description naming the element and instance
          */
         public ElementNotActiveException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Raised when a caller asks to complete "the" waiting task and the journey has more than one.
+     *
+     * <p>Distinct from {@link ElementNotActiveException} because the fix differs: here the caller
+     * must name a task, there they named one that has already moved on. Both are 409 — the request
+     * is well-formed, the journey is simply not in a state that can satisfy it.
+     */
+    public static class AmbiguousTaskException extends RuntimeException {
+        /**
+         * @param message description naming the instance and the tasks in contention
+         */
+        public AmbiguousTaskException(String message) {
             super(message);
         }
     }
@@ -86,24 +115,154 @@ public class TreatmentJourneyUseCase {
      * @throws ElementNotActiveException when no task is waiting at that element
      */
     public JourneyTask completeStep(long processInstanceKey, String elementId, Map<String, Object> variables) {
+        return completeStep(processInstanceKey, elementId, null, variables);
+    }
+
+    /**
+     * Completes the human step currently waiting at the given element, recording who did it.
+     *
+     * @param processInstanceKey instance to advance
+     * @param elementId          BPMN element id of the waiting task
+     * @param completedBy        who is completing the step, or {@code null}
+     * @param variables          variables captured on the form
+     * @return the task that was completed
+     * @throws ElementNotActiveException when no task is waiting at that element
+     */
+    public JourneyTask completeStep(
+            long processInstanceKey, String elementId, String completedBy, Map<String, Object> variables) {
+
         JourneyTask task = orchestration.activeTasks(processInstanceKey).stream()
                 .filter(t -> t.elementId().equals(elementId))
                 .findFirst()
                 .orElseThrow(() -> new ElementNotActiveException(
                         "No user task waiting at '" + elementId + "' on instance " + processInstanceKey));
 
-        orchestration.completeTask(task.userTaskKey(), variables);
-        return task;
+        return complete(processInstanceKey, task, completedBy, variables);
     }
 
     /**
-     * Completes a human step by engine key, for callers that already hold one.
+     * Completes a human step by engine key, scoped to the journey it belongs to.
+     *
+     * <p>The scoped form is the one to prefer: it proves the key is waiting on <em>this</em> instance
+     * before completing anything, so a key copied from another case fails loudly instead of quietly
+     * advancing someone else's journey. {@link #completeTask(long, Map)} keeps the unscoped
+     * behaviour for callers that hold a key and nothing else.
+     *
+     * @param processInstanceKey instance the task must belong to
+     * @param userTaskKey        task to complete
+     * @param completedBy        who is completing the step, or {@code null}
+     * @param variables          variables captured on the form
+     * @return the task that was completed
+     * @throws ElementNotActiveException when that key is not waiting on that instance
+     */
+    public JourneyTask completeTaskOnInstance(
+            long processInstanceKey, long userTaskKey, String completedBy, Map<String, Object> variables) {
+
+        JourneyTask task = orchestration.activeTasks(processInstanceKey).stream()
+                .filter(t -> t.userTaskKey() == userTaskKey)
+                .findFirst()
+                .orElseThrow(() -> new ElementNotActiveException(
+                        "No user task " + userTaskKey + " waiting on instance " + processInstanceKey));
+
+        return complete(processInstanceKey, task, completedBy, variables);
+    }
+
+    /**
+     * Completes the one human step a journey is waiting on, without needing to name it.
+     *
+     * <p>Convenience for the single-task stretches of the journey, which is most of it. During the
+     * specialist-consultation phase several tasks wait at once and this deliberately refuses to
+     * guess.
+     *
+     * @param processInstanceKey instance to advance
+     * @param completedBy        who is completing the step, or {@code null}
+     * @param variables          variables captured on the form
+     * @return the task that was completed
+     * @throws ElementNotActiveException when nothing is waiting
+     * @throws AmbiguousTaskException    when more than one task is waiting
+     */
+    public JourneyTask completeOnlyWaitingTask(
+            long processInstanceKey, String completedBy, Map<String, Object> variables) {
+
+        List<JourneyTask> waiting = orchestration.activeTasks(processInstanceKey);
+        if (waiting.isEmpty()) {
+            throw new ElementNotActiveException(
+                    "No user task waiting on instance " + processInstanceKey);
+        }
+        if (waiting.size() > 1) {
+            throw new AmbiguousTaskException("Instance " + processInstanceKey + " has "
+                    + waiting.size() + " tasks waiting (" + elementIdsOf(waiting)
+                    + "); complete one by element id or user task key");
+        }
+        return complete(processInstanceKey, waiting.get(0), completedBy, variables);
+    }
+
+    /**
+     * Completes a human step by engine key, unscoped.
      *
      * @param userTaskKey task to complete
      * @param variables   variables captured on the form
      */
     public void completeTask(long userTaskKey, Map<String, Object> variables) {
         orchestration.completeTask(userTaskKey, variables);
+    }
+
+    /**
+     * @param processInstanceKey journey to read the audit trail for
+     * @return every human step completed through this service, oldest first
+     */
+    public List<CaseTaskOutcomeRecord> taskOutcomes(long processInstanceKey) {
+        return outcomes.findByProcessInstanceKey(processInstanceKey);
+    }
+
+    /**
+     * Completes a resolved task and records what was submitted.
+     *
+     * <p>The case id is read before the task is completed, not after: completing may finish the
+     * instance outright, and the engine stops answering variable queries for it once it has.
+     */
+    private JourneyTask complete(
+            long processInstanceKey, JourneyTask task, String completedBy, Map<String, Object> variables) {
+
+        String caseId = caseIdOf(processInstanceKey);
+        orchestration.completeTask(task.userTaskKey(), variables);
+
+        outcomes.save(new CaseTaskOutcomeRecord(
+                caseId,
+                processInstanceKey,
+                task.userTaskKey(),
+                task.elementId(),
+                task.name(),
+                completedBy,
+                toJson(variables),
+                LocalDateTime.now()));
+
+        return task;
+    }
+
+    /**
+     * Best-effort read of the business key. The audit row is worth writing even when the engine is
+     * mid-transition and will not answer, so a failure here degrades the row rather than the request.
+     */
+    private String caseIdOf(long processInstanceKey) {
+        try {
+            Object value = orchestration.variables(processInstanceKey).get("caseId");
+            return value == null ? null : value.toString();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private String toJson(Map<String, Object> variables) {
+        try {
+            return objectMapper.writeValueAsString(variables == null ? Map.of() : variables);
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    private static String elementIdsOf(List<JourneyTask> tasks) {
+        return String.join(", ", tasks.stream().map(JourneyTask::elementId).toList());
     }
 
     /**

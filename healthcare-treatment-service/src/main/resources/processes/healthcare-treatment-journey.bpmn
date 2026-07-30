@@ -364,7 +364,17 @@
       <bpmn:incoming>Flow_9</bpmn:incoming>
       <bpmn:outgoing>Flow_10</bpmn:outgoing>
     </bpmn:businessRuleTask>
-    <bpmn:exclusiveGateway id="Gateway_Ready" name="Ready for discharge?">
+    <!--
+      Flow_NotReady is the default flow. The discharge decision uses hit policy UNIQUE, so an input
+      combination no rule covers yields no result at all rather than a false one — and then neither
+      condition here evaluates to true and the instance raises a CONDITION_ERROR incident. Defaulting
+      to "not ready" routes that case to the attempt counter instead, which retries and escalates to
+      the Clinical Director after three passes.
+
+      Defaulting towards "not discharged" is the safe direction: an indeterminate decision should
+      never be the reason a patient is released.
+    -->
+    <bpmn:exclusiveGateway id="Gateway_Ready" name="Ready for discharge?" default="Flow_NotReady">
       <bpmn:incoming>Flow_10</bpmn:incoming>
       <bpmn:outgoing>Flow_ReadyYes</bpmn:outgoing>
       <bpmn:outgoing>Flow_NotReady</bpmn:outgoing>
@@ -473,9 +483,8 @@
     <bpmn:sequenceFlow id="Flow_ReadyYes" name="Ready" sourceRef="Gateway_Ready" targetRef="Task_DischargeSummary">
       <bpmn:conditionExpression>=dischargeResult.dischargeReady = true</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="Flow_NotReady" name="Not ready" sourceRef="Gateway_Ready" targetRef="Task_IncrementCounter">
-      <bpmn:conditionExpression>=dischargeResult.dischargeReady = false</bpmn:conditionExpression>
-    </bpmn:sequenceFlow>
+    <!-- Default flow: carries both "the decision said no" and "the decision said nothing". -->
+    <bpmn:sequenceFlow id="Flow_NotReady" name="Not ready" sourceRef="Gateway_Ready" targetRef="Task_IncrementCounter" />
     <bpmn:sequenceFlow id="Flow_CheckMax" sourceRef="Task_IncrementCounter" targetRef="Gateway_MaxAttempts" />
     <bpmn:sequenceFlow id="Flow_Escalate" name="Over 3 attempts" sourceRef="Gateway_MaxAttempts" targetRef="Task_ClinDirectorReview">
       <bpmn:conditionExpression>=dischargeAttemptCount &gt; 3</bpmn:conditionExpression>

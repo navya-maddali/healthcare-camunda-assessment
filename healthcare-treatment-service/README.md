@@ -108,6 +108,48 @@ Everything the journey needs at runtime is also reachable over REST under `/api/
 inspect and complete tasks, read variables, incidents and active elements, evaluate decisions,
 and read back the archive. That is what the Postman collection drives.
 
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/cases` | Admit a patient and start the journey |
+| `GET` | `/cases/{key}` | Lifecycle state; 404 for a second or two while the engine indexes |
+| `GET` | `/cases/{key}/tasks` | User tasks currently waiting |
+| `POST` | `/cases/{key}/tasks/completion` | Complete **the** waiting task — no key needed |
+| `POST` | `/cases/{key}/tasks/{idOrKey}/completion` | Complete by element id **or** by user task key |
+| `GET` | `/cases/{key}/tasks/outcomes` | Audit trail of every human step completed here |
+| `POST` | `/tasks/{taskKey}/completion` | Complete by key, unscoped |
+| `GET` | `/cases/{key}/variables` | Every process variable, JSON parsed |
+| `GET` | `/cases/{key}/incidents` | Incidents, resolved ones included |
+| `GET` | `/cases/{key}/elements` | Active element instances |
+| `POST` | `/cases/{key}/diversion` | Move the token — also how ad-hoc consults are activated |
+| `POST` | `/cases/{caseId}/vitals-alerts` | Correlate the `VitalsAlert` message |
+| `DELETE` | `/cases/{key}` | Cancel the journey |
+| `POST` | `/decisions/{decisionId}/evaluation` | Evaluate a DMN table directly |
+| `GET` | `/archive/{caseId}` | Read the archived record back from PostgreSQL |
+
+**Completing tasks.** Three routes exist because they serve different callers. Most of the journey
+waits on exactly one task, so `POST /cases/{key}/tasks/completion` is the least typing and the one
+to reach for. Naming the task is only necessary during the specialist-consultation phase, where
+several wait at once — and there the no-key route returns `409` naming the contenders rather than
+guessing. The `{idOrKey}` segment takes either form: all digits is a user task key, anything else is
+a BPMN element id. Element ids here are all `Task_*`, so nothing is ambiguous.
+
+Completing by key through `/cases/{key}/tasks/{idOrKey}/completion` checks the task actually belongs
+to that journey. The older unscoped `/tasks/{taskKey}/completion` does not — a key copied from
+another case would complete that other case. Prefer the scoped form.
+
+Every completion accepts an optional `completedBy`, and writes a row to `case_task_outcome`:
+
+```bash
+curl -X POST http://localhost:8081/api/v1/cases/$KEY/tasks/completion \
+  -H 'Content-Type: application/json' \
+  -d '{"completedBy":"dr.mehta","variables":{"treatmentPlan":"…","consultsRequired":false}}'
+```
+
+That trail outlives both the engine's history retention and the instance itself — cancelling a
+journey does not erase what was submitted before it was cancelled.
+
 ---
 
 ## Deploy the process artifacts

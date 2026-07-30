@@ -8,6 +8,8 @@ import com.aaseya.healthcare.application.ProcessOrchestrationPort.JourneyTask;
 import com.aaseya.healthcare.application.ProcessOrchestrationPort.StartedInstance;
 import com.aaseya.healthcare.application.TreatmentJourneyUseCase;
 import com.aaseya.healthcare.domain.PatientCaseRecord;
+import com.aaseya.healthcare.web.dto.CompleteTaskRequest;
+import com.aaseya.healthcare.web.dto.TaskOutcomeView;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import java.util.List;
@@ -110,19 +112,78 @@ public class TreatmentJourneyController {
     }
 
     /**
-     * Completes the task waiting at an element.
+     * Completes the single task a journey is waiting on.
      *
-     * @param key       instance key
-     * @param elementId BPMN element id of the waiting task
-     * @param request   variables captured on the form, may be absent
+     * <p>Saves the caller a lookup for the long single-task stretches of the journey. Refuses rather
+     * than guesses while the specialist consultations run in parallel.
+     *
+     * @param key     instance key
+     * @param request variables and {@code completedBy}, may be absent
      * @return the task that was completed
      */
-    @PostMapping("/cases/{key}/tasks/{elementId}/completion")
+    @PostMapping("/cases/{key}/tasks/completion")
+    public JourneyTask completeOnlyTask(
+            @PathVariable long key,
+            @RequestBody(required = false) CompleteTaskRequest request) {
+        return journey.completeOnlyWaitingTask(
+                key, CompleteTaskRequest.completedByOf(request), CompleteTaskRequest.variablesOf(request));
+    }
+
+    /**
+     * Completes a waiting task, addressed either by BPMN element id or by engine key.
+     *
+     * <p>One route rather than two because both address the same thing and Spring cannot map the
+     * same URI template twice. An all-digits segment is a user task key; anything else is an element
+     * id. The two never collide — every element id in this process is of the form {@code Task_*}.
+     *
+     * <p>Completing by key here is scoped to {@code key}: a task belonging to another journey is
+     * rejected rather than silently completed. That is the difference from
+     * {@link #completeTask(long, VariablesRequest)}.
+     *
+     * @param key       instance key
+     * @param idOrKey   BPMN element id, or the user task key
+     * @param request   variables and {@code completedBy}, may be absent
+     * @return the task that was completed
+     */
+    @PostMapping("/cases/{key}/tasks/{idOrKey}/completion")
     public JourneyTask completeStep(
             @PathVariable long key,
-            @PathVariable String elementId,
-            @RequestBody(required = false) VariablesRequest request) {
-        return journey.completeStep(key, elementId, variablesOf(request));
+            @PathVariable String idOrKey,
+            @RequestBody(required = false) CompleteTaskRequest request) {
+
+        String completedBy = CompleteTaskRequest.completedByOf(request);
+        Map<String, Object> variables = CompleteTaskRequest.variablesOf(request);
+
+        if (isUserTaskKey(idOrKey)) {
+            return journey.completeTaskOnInstance(key, Long.parseLong(idOrKey), completedBy, variables);
+        }
+        return journey.completeStep(key, idOrKey, completedBy, variables);
+    }
+
+    /**
+     * @param key instance key
+     * @return every human step completed through this API, oldest first
+     */
+    @GetMapping("/cases/{key}/tasks/outcomes")
+    public List<TaskOutcomeView> taskOutcomes(@PathVariable long key) {
+        return journey.taskOutcomes(key).stream().map(TaskOutcomeView::from).toList();
+    }
+
+    /**
+     * A path segment is a user task key when it is all digits and fits a {@code long}. Element ids
+     * in this process are never numeric, so nothing is ambiguous; a segment too long to be a key
+     * falls through to the element-id path and fails there with a clear message.
+     */
+    private static boolean isUserTaskKey(String segment) {
+        if (segment.isEmpty() || !segment.chars().allMatch(Character::isDigit)) {
+            return false;
+        }
+        try {
+            Long.parseLong(segment);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     /**

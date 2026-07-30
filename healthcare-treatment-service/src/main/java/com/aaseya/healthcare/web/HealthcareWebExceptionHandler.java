@@ -1,5 +1,6 @@
 package com.aaseya.healthcare.web;
 
+import com.aaseya.healthcare.application.TreatmentJourneyUseCase.AmbiguousTaskException;
 import com.aaseya.healthcare.application.TreatmentJourneyUseCase.ElementNotActiveException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,6 +46,17 @@ public class HealthcareWebExceptionHandler {
     @ExceptionHandler(ElementNotActiveException.class)
     public ResponseEntity<ProblemDetail> onElementNotActive(ElementNotActiveException ex) {
         return problem(HttpStatus.CONFLICT, "Element not active", ex.getMessage());
+    }
+
+    /**
+     * @param ex raised when "complete the waiting task" is asked of a journey waiting on several
+     * @return 409, for the same reason as above — the request is well-formed, the journey is not in
+     *         a state that can satisfy it. The detail names the tasks in contention so the caller
+     *         can pick one.
+     */
+    @ExceptionHandler(AmbiguousTaskException.class)
+    public ResponseEntity<ProblemDetail> onAmbiguousTask(AmbiguousTaskException ex) {
+        return problem(HttpStatus.CONFLICT, "Ambiguous task", ex.getMessage());
     }
 
     /**

@@ -59,9 +59,24 @@ exclusive by construction — `DETERIORATING` blocks regardless of the other inp
 `STABLE`/`IMPROVING` rules partition the two booleans.
 
 UNIQUE has a consequence worth stating: when an input is **missing**, no rule matches and the
-decision returns `null`, after which `=dischargeResult.dischargeReady` fails. `treatmentStepsCompleted`
-and `labResultsNormal` are therefore mandatory fields on the nurse's `treatment-admin-form`. This
-is intentional — a discharge gate should refuse to answer on incomplete data rather than guess.
+decision returns `null`. `treatmentStepsCompleted` and `labResultsNormal` are therefore fields on
+the nurse's `treatment-admin-form`. This is intentional — a discharge gate should refuse to answer
+on incomplete data rather than guess.
+
+Refusing to answer is only half a design, though. `=dischargeResult.dischargeReady = true` and
+`… = false` both evaluate to false against a `null` result, so `Gateway_Ready` originally had no
+outgoing flow to take and raised a `CONDITION_ERROR` incident — the journey stopped dead at the
+gate. That was observed in a live run: completing `Task_TreatmentAdmin` through the REST API with a
+payload thinner than the form (the API cannot enforce form fields) produced exactly it.
+
+**`Flow_NotReady` is now the gateway's default flow.** An indeterminate decision routes to the
+attempt counter, which retries the treatment loop and escalates to the Clinical Director after three
+passes. Defaulting towards *not discharged* is the safe direction — an unanswerable decision should
+never be the reason a patient is released — and it turns a stuck instance into a clinical
+escalation, which is a path the process already models.
+
+Note this is a mitigation, not a licence: the form is still the contract, and the right payload is
+still the one the form defines.
 
 Both tables are unit-testable in isolation through
 `POST /v2/decision-definitions/evaluation` without starting a process instance.

@@ -10,7 +10,9 @@ import com.aaseya.healthcare.application.ProcessOrchestrationPort;
 import com.aaseya.healthcare.application.ArchiveCaseUseCase;
 import com.aaseya.healthcare.application.LabOrderingUseCase;
 import com.aaseya.healthcare.application.LabResultIngestionUseCase;
+import com.aaseya.healthcare.application.CaseTaskOutcomeArchive;
 import com.aaseya.healthcare.application.TreatmentJourneyUseCase;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.aaseya.healthcare.application.VitalsMonitoringUseCase;
 import io.camunda.client.CamundaClient;
 import org.springframework.context.annotation.Bean;
@@ -94,11 +96,17 @@ public class WorkerBeansConfig {
      *
      * @param orchestration outbound port to the workflow engine
      * @param archive       outbound port to the case store
+     * @param outcomes      outbound port to the human-step audit trail
+     * @param objectMapper  Boot's configured mapper, reused so the audit trail serialises variables
+     *                      exactly as the API rendered them
      * @return use case for starting and steering a treatment journey
      */
     @Bean
     public TreatmentJourneyUseCase treatmentJourneyUseCase(
-            ProcessOrchestrationPort orchestration, PatientCaseArchive archive) {
-        return new TreatmentJourneyUseCase(orchestration, archive);
+            ProcessOrchestrationPort orchestration,
+            PatientCaseArchive archive,
+            CaseTaskOutcomeArchive outcomes,
+            ObjectMapper objectMapper) {
+        return new TreatmentJourneyUseCase(orchestration, archive, outcomes, objectMapper);
     }
 }
