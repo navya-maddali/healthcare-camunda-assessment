@@ -1,0 +1,33 @@
+# Copy to `application-local.yml` and fill in real values. That file is git-ignored
+# (.gitignore: **/application-local.yml) — never commit it.
+#
+# Run with:  mvn spring-boot:run "-Dspring-boot.run.profiles=local"
+#
+# PostgreSQL 17 must be running. Create the database once:
+#   psql -h localhost -U postgres -c "CREATE DATABASE healthcare_journey;"
+# Flyway then creates the tables (V1 framework, V2 patient_case). Do not create them by hand.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/healthcare_journey
+    username: postgres
+    password: postgres
+
+server:
+  # The Postman environment targets 8081. Change both if you prefer the 8080 default.
+  port: 8081
+
+# Camunda 8.9 SaaS cluster credentials — GET THESE FROM YOUR CAMUNDA CONSOLE
+# (Cluster -> API -> Client credentials). Never commit real values.
+camunda:
+  client:
+    mode: saas
+    cloud:
+      cluster-id: <YOUR_CLUSTER_ID>
+      region: <YOUR_REGION>
+    auth:
+      client-id: <YOUR_CLIENT_ID>
+      client-secret: <YOUR_CLIENT_SECRET>
+
+# The two AI connector steps additionally need an OPENAI_API_TOKEN secret configured in
+# Camunda Console (Cluster -> Connector secrets). That secret lives in the cluster, not here —
+# the BPMN references it as {{secrets.OPENAI_API_TOKEN}}. Without it both AI tasks incident.

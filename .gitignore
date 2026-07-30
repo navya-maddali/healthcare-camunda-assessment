@@ -26,8 +26,16 @@ target/
 # ---------------------------------------------------------------------------
 camunda-process-framework-0.1.1 (3)/camunda-process-framework-0.1.1/service-template/src/main/resources/application.yml
 
+# Connector-secret exports from Camunda Console are named <clusterId>.env — `.env`
+# alone does not match those, hence the glob.
 .env
+*.env
+!*.env.example
 *.local.yml
+**/application-local.yml
+
+# Reference checkout of the assessment repo, kept alongside for comparison. Not ours to commit.
+incident-response-service/
 
 # ---------------------------------------------------------------------------
 # IDE

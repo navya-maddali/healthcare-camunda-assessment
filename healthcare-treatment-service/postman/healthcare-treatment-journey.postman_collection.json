@@ -173,46 +173,7 @@
             "description": "Completes a task by BPMN element id — the service resolves the engine key. Use `/tasks/{taskKey}/completion` in 03 Utilities if you already hold a key."
           }
         },
-        {
-          "name": "01.4 Await AI incident",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const incidents = pm.response.json();",
-                  "const hit = incidents.find(i => i.elementId === 'Task_HistorySummary');",
-                  "",
-                  "if (hit) {",
-                  "  pm.environment.set('pollCount', 0);",
-                  "  pm.test('AI connector incident raised as documented', () => pm.expect(hit.errorMessage).to.include('OPENAI_API_KEY'));",
-                  "  console.log('Expected blocker reached: ' + hit.errorMessage.split('|')[0].trim());",
-                  "} else {",
-                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  pm.environment.set('pollCount', n);",
-                  "  if (n > 25) {",
-                  "    pm.environment.set('pollCount', 0);",
-                  "    console.log('No AI incident — the OPENAI_API_KEY secret may now be configured. Skip 01.5 if so.');",
-                  "  } else {",
-                  "    pm.execution.setNextRequest(pm.info.requestName);",
-                  "  }",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/cases/{{processInstanceKey}}/incidents",
-              "host": ["{{baseUrl}}"],
-              "path": ["cases", "{{processInstanceKey}}", "incidents"]
-            },
-            "description": "The AI history-summary task fails without an `OPENAI_API_KEY` connector secret. This request confirms the blocker rather than hiding it. If the secret is configured in your cluster, this poll finds nothing and 01.5 becomes unnecessary."
-          }
-        },
+        
         {
           "name": "01.6 Await Cardiology Workup",
           "event": [
@@ -955,48 +916,7 @@
             "description": "Polls for the task, then completes it by engine key from the test script — exercising the `/tasks/{taskKey}/completion` endpoint alongside the element-id form used elsewhere."
           }
         },
-        {
-          "name": "02.3 Await AI incident",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// Registration was completed from the previous request's script, so the AI task has",
-                  "// only just been reached. Diverting before it is actually active returns 409, so",
-                  "// wait for its incident first — the same reason the happy path polls at 01.4.",
-                  "const incidents = pm.response.json();",
-                  "const hit = incidents.find(i => i.elementId === 'Task_HistorySummary');",
-                  "",
-                  "if (hit) {",
-                  "  pm.environment.set('pollCount', 0);",
-                  "  pm.test('AI connector incident raised', () => pm.expect(hit.errorMessage).to.include('OPENAI_API_KEY'));",
-                  "} else {",
-                  "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
-                  "  pm.environment.set('pollCount', n);",
-                  "  if (n > 25) {",
-                  "    pm.environment.set('pollCount', 0);",
-                  "    console.log('No AI incident — the OPENAI_API_KEY secret may now be configured. Skip 02.4 if so.');",
-                  "  } else {",
-                  "    pm.execution.setNextRequest(pm.info.requestName);",
-                  "  }",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/cases/{{errProcessInstanceKey}}/incidents",
-              "host": ["{{baseUrl}}"],
-              "path": ["cases", "{{errProcessInstanceKey}}", "incidents"]
-            },
-            "description": "Waits for the AI task to actually fail before 02.4 tries to divert past it. Without this the diversion races the engine and returns 409."
-          }
-        },
+        
         {
           "name": "02.5 Verify escalation raised",
           "event": [

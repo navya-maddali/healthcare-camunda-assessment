@@ -89,8 +89,15 @@ clinician always reviews AI output before it reaches the record.
 
 **Failure handling.** `connectionTimeoutInSeconds: 20` bounds a hanging model call and
 `retries="2"` bounds transient failures; exhausting them raises an incident rather than silently
-degrading. The API key is a Camunda Console connector secret (`{{secrets.OPENAI_API_KEY}}`) and
+degrading. The API key is a Camunda Console connector secret (`{{secrets.OPENAI_API_TOKEN}}`) and
 never appears in the model.
+
+**Response handling — a loose end.** The connector's full raw HTTP response is published as a
+process variable, not just the extracted text. `historySummary` is mapped correctly, but the
+`response` variable alongside it retains the entire OpenAI envelope: every response header,
+including `set-cookie` (`__cf_bm`), `x-request-id`, and the organisation and project identifiers.
+That is roughly 3 KB of noise per instance, persisted in process state and visible to anyone with
+Operate access. Mapping the result down to `historySummary` alone would be the tidier contract.
 
 ---
 
@@ -120,6 +127,16 @@ patient can actually recover and the loop converges.
 job keyed on `(businessKey, elementId)`. The key is mapped per task in the BPMN, not globally:
 the multi-instance branches use `=caseId + "-" + testType`, because keying on `caseId` alone
 would make the guard treat the second diagnostic branch as a replay of the first and skip it.
+
+The vitals check needs the same treatment for a different reason. It sits inside the revise-plan
+loop, so the *same* element is legitimately reached more than once. Inheriting the process-wide
+`businessKey` made both halves of the key identical on every pass, and the guard could not tell a
+second pass from a redelivery of the first — vitals never refreshed, the discharge gate never
+opened, and the loop could not terminate. Folding the attempt counter in
+(`=caseId + "-vitals-" + string(dischargeAttemptCount)`) distinguishes them: a genuine redelivery
+carries the same count and is still suppressed, a new pass is not. The general rule — at-least-once
+delivery is about the same *job* arriving twice, not the same *element* being reached twice, and a
+key that cannot separate the two will silently swallow loop iterations.
 Archiving additionally checks `existsByCaseId` and is backed by a unique constraint on
 `case_id` — the guard covers the common case, the constraint covers the concurrent race.
 
@@ -131,9 +148,25 @@ on the message. The event sub-process is non-interrupting, so alerting never can
 
 ## 5. Layering
 
-`domain` → no Spring, no Camunda, no JPA; `application` → use cases and outbound ports;
-`infrastructure` → Camunda workers, JPA adapters, wiring. Workers hold no business rules; they
-bind variables, call a use case, and map the result to a `WorkResult`.
+`domain` → no Spring Web, no Camunda; `application` → use cases and outbound ports; `repository` →
+Spring Data interfaces; `web` → controllers and DTOs; `infrastructure` → Camunda adapters, JPA
+adapters, wiring. Workers hold no business rules; they bind variables, call a use case, and map the
+result to a `WorkResult`.
+
+**The package names are enforced, not conventional.** `HealthcareArchitectureTest` runs the
+framework's six `ArchitectureRules` over `com.aaseya.healthcare`. The one that shapes the tree is
+`ONLY_INFRASTRUCTURE_CAMUNDA_MAY_IMPORT_CAMUNDA_CLIENT`: any class importing `io.camunda.client`
+must sit under `infrastructure.camunda`. That is why the five job workers live in
+`infrastructure/camunda/worker/` rather than a top-level `worker/`, and why engine-rejection
+handling sits in `CamundaEngineExceptionAdvice` under `infrastructure/camunda/` instead of beside
+the other web advice — it is the only advice needing `ProblemException` and `ClientStatusException`,
+and keeping it there is what lets `web/` stay free of engine imports.
+
+The split also means the framework's own `GlobalExceptionHandler` (from `framework-web-starter`)
+does most of the work. `HealthcareWebExceptionHandler` only fills the gaps it leaves: an unmapped
+path, a wrong method, an unsupported media type, an unparseable body and a path variable that will
+not convert would otherwise all reach its `Exception` catch-all and return 500, which tells a caller
+to raise a ticket when the fix is in their own request.
 
 `VitalsAssessment` is the single authority on vitals thresholds. Previously those thresholds were
 inlined in the worker *and* duplicated on the reading record, and the two had already drifted —
@@ -147,7 +180,9 @@ rather than in production.
 
 ## 6. Known limitations
 
-- The AI tasks require an `OPENAI_API_KEY` connector secret; without it they incident.
+- The AI tasks require an `OPENAI_API_TOKEN` connector secret; without it they incident.
+- The AI connector's raw HTTP response is persisted as a process variable alongside the extracted
+  summary — see *Response handling* in §3.
 - Diagnostic results and the vitals feed are simulated deterministically — there is no real
   analyser or bedside-monitor integration.
 - The ad-hoc completion condition (`=consultsComplete = true`) is satisfied from the consult form.

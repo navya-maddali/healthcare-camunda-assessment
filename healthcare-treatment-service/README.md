@@ -46,18 +46,34 @@ Flyway creates the schema on first start — do not create tables by hand.
 
 ## Configuration
 
-No credentials are committed. `application.yml` reads them from the environment:
+No credentials are committed. Copy the example profile and fill it in:
 
 ```bash
-export CAMUNDA_CLIENT_ID='<api client id>'
-export CAMUNDA_CLIENT_SECRET='<api client secret>'
-export CAMUNDA_CLUSTER_ID='<cluster uuid>'
-export CAMUNDA_REGION='sin-1'
+cp src/main/resources/application-local.yml.example src/main/resources/application-local.yml
 ```
 
-The two AI Connector tasks additionally need an **`OPENAI_API_KEY` secret created in Camunda
-Console** (Cluster → Connector secrets). The BPMN references it as `{{secrets.OPENAI_API_KEY}}`.
-Without it those two tasks raise incidents.
+`application-local.yml` is git-ignored (`.gitignore`: `**/application-local.yml`) and holds the
+cluster id, region, client id and client secret from Camunda Console → Cluster → API. Run with the
+`local` profile and nothing else is needed:
+
+```bash
+mvn spring-boot:run "-Dspring-boot.run.profiles=local"
+```
+
+Environment variables still work if you prefer them — `application.yml` reads
+`CAMUNDA_CLIENT_ID`, `CAMUNDA_CLIENT_SECRET`, `CAMUNDA_CLUSTER_ID`, `CAMUNDA_REGION`, `DB_URL`,
+`DB_USER`, `DB_PASSWORD` and `SERVER_PORT`. Every one has a default, so a missing value surfaces
+as a connection error you can read rather than an unresolvable-placeholder crash before the
+context is even built.
+
+> Connector-secret exports downloaded from Camunda Console are named `<clusterId>.env`. Those are
+> **cluster** secrets (the AI connector's token, for one) — they do not contain the client
+> credentials this service needs, and `.gitignore` catches them via `*.env`.
+
+The two AI Connector tasks additionally need an **`OPENAI_API_TOKEN` secret created in Camunda
+Console** (Cluster → Connector secrets). The BPMN references it as `{{secrets.OPENAI_API_TOKEN}}`.
+Without it those two tasks raise incidents. On the `sin-1` cluster this secret is configured and
+verified working — a run on 2026-07-30 returned a summary from `gpt-4o-mini` with no incident.
 
 ---
 
@@ -66,46 +82,76 @@ Without it those two tasks raise incidents.
 ```bash
 cd healthcare-treatment-service
 mvn clean verify
-mvn spring-boot:run
+mvn spring-boot:run "-Dspring-boot.run.profiles=local"
 ```
+
+`mvn verify` runs the architecture tests. The example profile sets port **8081**, which is what the
+Postman environment targets; `application.yml` defaults to 8080 without it.
 
 Expected on startup:
 
 ```
 Flyway   : Successfully applied 2 migrations to schema "public", now at version v2
+Deployed : <healthcare-treatment-journey:N>, 2 decisions, 8 forms
 Workers  : lab-test-ordering, lab-result-ingestion, vitals-monitoring,
            vitals-alert-handler, record-archiving
-Started Application in ~12 seconds
+Started HealthcareTreatmentApplication in ~17 seconds
 ```
 
 ```bash
-curl -s http://localhost:8080/actuator/health     # camundaClient UP, db UP
+curl -s http://localhost:8081/actuator/health     # camundaClient UP, db UP
 ```
+
+API documentation is served at `/swagger-ui/index.html`, raw schema at `/v3/api-docs`.
+
+Everything the journey needs at runtime is also reachable over REST under `/api/v1` — admit,
+inspect and complete tasks, read variables, incidents and active elements, evaluate decisions,
+and read back the archive. That is what the Postman collection drives.
 
 ---
 
 ## Deploy the process artifacts
 
-BPMN, DMN and forms live under `src/main/resources/processes/`. Deploy all of them together —
-the process references the forms and decisions by id, so a partial deployment leaves dangling
-references.
+**Deployment is automatic.** `CamundaDeploymentConfig` carries an `@Deployment` annotation that
+pushes all 11 resources — 1 BPMN + 2 DMN + 8 forms — to the cluster on every startup:
 
-```bash
-TOKEN=$(curl -s -X POST https://login.cloud.camunda.io/oauth/token \
-  -H "Content-Type: application/json" \
-  -d "{\"grant_type\":\"client_credentials\",\"client_id\":\"$CAMUNDA_CLIENT_ID\",\"client_secret\":\"$CAMUNDA_CLIENT_SECRET\",\"audience\":\"zeebe.camunda.io\"}" \
-  | grep -o '"access_token":"[^"]*"' | sed 's/.*:"//;s/"//')
-
-BASE="https://${CAMUNDA_REGION}.zeebe.camunda.io/${CAMUNDA_CLUSTER_ID}/v2"
-
-cd src/main/resources/processes
-ARGS=""; for f in bpmn/*.bpmn dmn/*.dmn forms/*.form; do ARGS="$ARGS -F resources=@$f"; done
-curl -s -X POST "$BASE/deployments" -H "Authorization: Bearer $TOKEN" $ARGS
+```java
+@Deployment(resources = {
+        "classpath*:processes/*.bpmn",
+        "classpath*:dmn/*.dmn",
+        "classpath*:forms/*.form"
+})
 ```
 
-Alternatively import the files into Web Modeler and deploy from there — recommended for the AI
-tasks, since applying the **OpenAI element template** (`io.camunda.connectors.OpenAI.v1`) gives
-you the connector UI instead of a raw service task.
+They go up in one deployment, which is what the process requires: it references the forms and
+decisions by id, so a partial deployment leaves dangling references. Camunda checksums each
+resource, so restarting without an edit does not create a new version.
+
+The startup log names what went up:
+
+```
+Deployed Processes: <healthcare-treatment-journey:21>
+Deployed Decisions: <discharge-readiness:7>,<triage-care-pathway:7>
+Deployed Forms:     <registration-form:17>, … (8 total)
+```
+
+This closes a failure mode that is otherwise easy to miss. Editing the BPMN without redeploying
+leaves the cluster running the previous version indefinitely — running instances stay bound to the
+version they started on. The symptom is quiet: `GET /api/v1/cases/{key}/tasks` returns `[]` and
+Tasklist shows nothing, while `/elements` still reports an ACTIVE element of type `USER_TASK`.
+That combination means the deployed version is missing `<zeebe:userTask />` — the element exists,
+but the engine created no user-task entity for it.
+
+Instances already running an older version do **not** migrate. After a change that matters, start a
+new instance and cancel the stranded ones. To confirm which version an instance is on:
+
+```bash
+curl -s http://localhost:8081/api/v1/cases/<key> | grep -o '"processDefinitionVersion":[0-9]*'
+```
+
+For editing rather than deploying, import the files into Web Modeler — recommended for the AI
+tasks, since applying the **OpenAI element template** (`io.camunda.connectors.OpenAI.v1`) gives you
+the connector UI instead of a raw service task.
 
 ---
 
@@ -115,19 +161,40 @@ Layering follows the framework convention; dependencies point inwards only.
 
 ```
 src/main/java/com/aaseya/healthcare/
-  domain/model/        Patient, VitalsReading, VitalsTrend, LabOrder, LabResult, PatientCaseRecord
-  domain/service/      VitalsAssessment          — the single authority on vitals thresholds
-  application/port/    PatientCaseArchive        — outbound port
-  application/service/ LabOrderingUseCase, LabResultIngestionUseCase,
-                       VitalsMonitoringUseCase, ArchiveCaseUseCase
+  HealthcareTreatmentApplication.java
+  domain/              Patient, VitalsReading, VitalsTrend, LabOrder, LabResult,
+                       PatientCaseRecord, PatientCaseEntity,
+                       VitalsAssessment      — the single authority on vitals thresholds
+  application/         PatientCaseArchive, ProcessOrchestrationPort  (outbound ports)
+                       LabOrderingUseCase, LabResultIngestionUseCase,
+                       VitalsMonitoringUseCase, ArchiveCaseUseCase, TreatmentJourneyUseCase
+  repository/          PatientCaseJpaRepository
+  web/                 TreatmentJourneyController, HealthcareWebExceptionHandler
+    dto/               request and response records
+  config/              OpenApiConfig
   infrastructure/
-    worker/            5 job workers, all extending the framework's BaseWorker
-    persistence/       PatientCaseEntity, JPA repository, JpaPatientCaseArchive adapter
-    config/            WorkerBeansConfig
+    camunda/           CamundaProcessOrchestration, CamundaDeploymentConfig,
+                       CamundaEngineExceptionAdvice, WorkerBeansConfig
+      worker/          5 job workers, all extending the framework's BaseWorker
+    persistence/       JpaPatientCaseArchive adapter
 src/main/resources/
+  application.yml, application-local.yml.example
   db/migration/        V1__framework_tables.sql, V2__patient_case.sql
-  processes/bpmn|dmn|forms/
+  processes/           healthcare-treatment-journey.bpmn
+  dmn/                 triage-care-pathway.dmn, discharge-readiness.dmn
+  forms/               8 Tasklist forms
+src/test/java/com/aaseya/healthcare/
+  architecture/        HealthcareArchitectureTest
 ```
+
+Two placements are load-bearing rather than stylistic:
+
+- **Everything touching `io.camunda.client` lives under `infrastructure/camunda/`** — the workers
+  and the engine exception advice included. `HealthcareArchitectureTest` enforces this via the
+  framework's `ONLY_INFRASTRUCTURE_CAMUNDA_MAY_IMPORT_CAMUNDA_CLIENT` rule; move one out and the
+  build fails.
+- **`dmn/` and `forms/` are siblings of `processes/`, not nested inside it** — the `@Deployment`
+  glob patterns are flat.
 
 ### Job workers
 
@@ -222,10 +289,16 @@ or `FlywayAutoConfiguration` is absent and migrations never run.
 **Schema validation fails at startup** — `ddl-auto` is `validate` on purpose. Fix the migration
 or the entity rather than switching to `update`.
 
-**Tasks do not appear in Tasklist** — every user task needs `<zeebe:userTask />`. Without it they
-are legacy job-worker tasks, invisible to the Tasklist v2 API.
+**Tasks do not appear in Tasklist, and `/tasks` returns `[]`** — every user task needs
+`<zeebe:userTask />`. Without it they are legacy job-worker tasks, invisible to the Tasklist v2
+API and to `/user-tasks/search`. Check the *deployed* XML rather than the local file — this bites
+hardest when the source is correct but was never redeployed. See *Deploy the process artifacts*.
 
-**AI tasks incident** — the `OPENAI_API_KEY` connector secret is missing in Camunda Console.
+**AI tasks incident** — the `OPENAI_API_TOKEN` connector secret is missing in Camunda Console.
+Note the name: it is `OPENAI_API_TOKEN`, not `OPENAI_API_KEY`.
+
+**`JAVA_HOME is not defined correctly`** — `mvn` fails before Spring Boot starts. The project
+needs JDK 21; check that `JAVA_HOME` points at a JDK that actually exists on the machine.
 
 ---
 

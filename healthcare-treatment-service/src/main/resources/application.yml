@@ -3,9 +3,9 @@ spring:
     name: healthcare-treatment-service
 
   datasource:
-    url: jdbc:postgresql://localhost:5432/healthcare_journey
-    username: postgres
-    password: postgres
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/healthcare_journey}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -20,16 +20,29 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
+server:
+  port: ${SERVER_PORT:8080}
+
+# Camunda 8.9 SaaS connection. Every value defaults to empty rather than being required:
+# a missing credential should surface as a connection failure you can read, not as an
+# unresolvable-placeholder crash before the context is even built.
+#
+# Real values belong in application-local.yml (git-ignored, profile `local`) — see
+# application-local.yml.example. Run with:
+#   mvn spring-boot:run "-Dspring-boot.run.profiles=local"
 camunda:
   client:
     mode: saas
     auth:
-      # Supplied from the environment — never committed. See README for the export lines.
-      client-id: ${CAMUNDA_CLIENT_ID}
-      client-secret: ${CAMUNDA_CLIENT_SECRET}
+      client-id: ${CAMUNDA_CLIENT_ID:}
+      client-secret: ${CAMUNDA_CLIENT_SECRET:}
     cloud:
-      cluster-id: ${CAMUNDA_CLUSTER_ID}
+      cluster-id: ${CAMUNDA_CLUSTER_ID:}
       region: ${CAMUNDA_REGION:sin-1}
+
+framework:
+  camunda:
+    multi-tenant: false
 
 management:
   endpoints:
@@ -39,6 +52,8 @@ management:
   endpoint:
     health:
       show-details: always
+      probes:
+        enabled: true
 
 logging:
   level:

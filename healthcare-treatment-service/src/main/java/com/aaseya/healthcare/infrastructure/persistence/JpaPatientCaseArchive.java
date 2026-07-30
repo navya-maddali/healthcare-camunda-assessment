@@ -1,7 +1,7 @@
 package com.aaseya.healthcare.infrastructure.persistence;
 
-import com.aaseya.healthcare.application.port.PatientCaseArchive;
-import com.aaseya.healthcare.domain.model.PatientCaseRecord;
+import com.aaseya.healthcare.application.PatientCaseArchive;
+import com.aaseya.healthcare.domain.PatientCaseRecord;
 import java.util.Optional;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;

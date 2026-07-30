@@ -1,6 +1,6 @@
 package com.aaseya.healthcare.infrastructure.camunda;
 
-import com.aaseya.healthcare.application.port.ProcessOrchestrationPort;
+import com.aaseya.healthcare.application.ProcessOrchestrationPort;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.camunda.client.CamundaClient;
 import io.camunda.client.api.command.ModifyProcessInstanceCommandStep1;

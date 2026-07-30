@@ -52,10 +52,43 @@
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
 
+    <!--
+      Swagger UI + OpenAPI. The 3.x line is the one built for the Spring Boot 4 / Jakarta
+      baseline the framework parent sets.
+    -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>3.0.1</version>
+    </dependency>
+
     <!-- Framework starters — consumed as published artifacts; never edited. -->
     <dependency>
       <groupId>com.aaseya.camunda</groupId>
       <artifactId>framework-camunda-starter</artifactId>
+      <version>0.1.0-SNAPSHOT</version>
+    </dependency>
+
+    <!--
+      Brings the framework's GlobalExceptionHandler, which already renders the framework
+      exception types and bean-validation failures as RFC 7807. Our own advice only fills the
+      gaps it leaves.
+    -->
+    <dependency>
+      <groupId>com.aaseya.camunda</groupId>
+      <artifactId>framework-web-starter</artifactId>
+      <version>0.1.0-SNAPSHOT</version>
+    </dependency>
+
+    <dependency>
+      <groupId>com.aaseya.camunda</groupId>
+      <artifactId>framework-data-starter</artifactId>
+      <version>0.1.0-SNAPSHOT</version>
+    </dependency>
+
+    <dependency>
+      <groupId>com.aaseya.camunda</groupId>
+      <artifactId>framework-observability-starter</artifactId>
       <version>0.1.0-SNAPSHOT</version>
     </dependency>
 
@@ -105,6 +138,24 @@
       <scope>test</scope>
     </dependency>
 
+    <!--
+      The framework's ArchUnit rule set, plus the ArchUnit JUnit 5 runner. These enforce the
+      layering this project's package structure exists to express — most importantly that
+      io.camunda.client stays inside infrastructure.camunda.
+    -->
+    <dependency>
+      <groupId>com.aaseya.camunda</groupId>
+      <artifactId>framework-test</artifactId>
+      <version>0.1.0-SNAPSHOT</version>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
   </dependencies>
 
   <build>
@@ -113,7 +164,7 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
         <configuration>
-          <mainClass>com.aaseya.healthcare.Application</mainClass>
+          <mainClass>com.aaseya.healthcare.HealthcareTreatmentApplication</mainClass>
         </configuration>
       </plugin>
     </plugins>

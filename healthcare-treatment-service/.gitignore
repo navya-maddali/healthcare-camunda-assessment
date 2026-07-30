@@ -1,5 +1,6 @@
 # Build output
 target/
+*.class
 
 # IDE
 .idea/
@@ -12,14 +13,25 @@ target/
 # OS
 Thumbs.db
 .DS_Store
+*.stackdump
 
-# Local environment — credentials must never be committed.
-# Camunda client id/secret and cluster id are read from environment variables
-# (see README); keep them in an untracked file such as this one.
+# Secrets — never commit real local config; copy from the committed *.example instead.
+#
+# Camunda cluster credentials live in application-local.yml (profile `local`).
+# Connector-secret exports downloaded from Camunda Console are named <clusterId>.env —
+# `.env` alone does NOT match those, which is why the `*.env` glob is here.
+**/application-local.yml
 .env
+*.env
+!*.env.example
 *.local.yml
 
 # Scratch output from manual API calls. Never put these under src/main/resources —
 # anything there is packaged into the jar.
 *.log
 scratch/
+
+# Postman CLI working directories. It creates these wherever it is run, and nests them
+# (postman/postman/postman/...) if run repeatedly from the same place.
+postman/.postman/
+postman/postman/
