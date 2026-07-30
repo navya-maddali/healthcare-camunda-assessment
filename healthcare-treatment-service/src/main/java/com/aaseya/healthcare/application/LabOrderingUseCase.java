@@ -41,4 +41,24 @@ public class LabOrderingUseCase {
 
         return new LabOrder(orderId, testType, LabOrder.ORDERED);
     }
+
+    /**
+     * Withdraws an order that was placed but never yielded a result.
+     *
+     * <p>This is the compensating action for {@link #placeOrder}. It runs when the diagnostics
+     * sub-process is interrupted after one or more branches have already booked their tests — the
+     * analyser accepting an order and then going down, for one. Without it the department holds a
+     * slot for a test nobody will read, and may still run it on a patient whose care has moved on.
+     *
+     * <p>Deliberately tolerant: compensation must not fail. An order the diagnostics system has
+     * already forgotten is nothing to worry about, so an unknown {@code orderId} is reported as
+     * cancelled rather than raised as an error.
+     *
+     * @param orderId  the order to withdraw
+     * @param testType the test it was booked for
+     * @return the withdrawn order
+     */
+    public LabOrder cancelOrder(String orderId, String testType) {
+        return new LabOrder(orderId, testType, LabOrder.CANCELLED);
+    }
 }

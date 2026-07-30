@@ -1,4 +1,6 @@
-package com.aaseya.healthcare.infrastructure.persistence;
+package com.aaseya.healthcare.repository;
+
+import com.aaseya.healthcare.domain.PatientCaseEntity;
 
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -6,8 +8,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 /**
  * Spring Data repository over {@link PatientCaseEntity}.
  *
- * <p>Not exposed beyond the infrastructure layer — {@link JpaPatientCaseArchive} adapts it to the
- * {@code PatientCaseArchive} port so the application layer never sees Spring Data.
+ * <p>Not exposed to the application layer — {@code JpaPatientCaseArchive} adapts it to the
+ * {@code PatientCaseArchive} port so nothing above infrastructure sees Spring Data.
  */
 public interface PatientCaseJpaRepository extends JpaRepository<PatientCaseEntity, Long> {
 

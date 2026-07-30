@@ -44,11 +44,14 @@ public class LabResultIngestionWorker extends BaseWorker<LabResultIngestionWorke
     /**
      * Typed input variables for the {@code lab-result-ingestion} job.
      *
-     * @param orderId  order being reported on
-     * @param testType the test that was run
-     * @param caseId   admission business key
+     * @param orderId            order being reported on
+     * @param testType           the test that was run
+     * @param caseId             admission business key
+     * @param analyserSystemDown simulates the analyser failing after the order was accepted;
+     *                           absent on the happy path, so boxed to tolerate {@code null}
      */
-    public record ResultVars(String orderId, String testType, String caseId) {
+    public record ResultVars(String orderId, String testType, String caseId,
+                             Boolean analyserSystemDown) {
     }
 
     @Override
@@ -63,7 +66,8 @@ public class LabResultIngestionWorker extends BaseWorker<LabResultIngestionWorke
 
     @Override
     protected WorkResult doWork(ResultVars vars, ActivatedJob job) {
-        LabResult result = ingestion.ingest(vars.orderId(), vars.testType());
+        boolean analyserDown = Boolean.TRUE.equals(vars.analyserSystemDown());
+        LabResult result = ingestion.ingest(vars.orderId(), vars.testType(), analyserDown);
 
         log.info("Result ingested | order={} test={} status={}",
                 result.orderId(), result.testType(), result.status());

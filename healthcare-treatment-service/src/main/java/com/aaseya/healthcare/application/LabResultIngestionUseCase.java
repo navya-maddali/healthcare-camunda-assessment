@@ -1,5 +1,6 @@
 package com.aaseya.healthcare.application;
 
+import com.aaseya.camunda.framework.core.exception.BusinessException;
 import com.aaseya.healthcare.domain.LabResult;
 
 /**
@@ -18,11 +19,23 @@ public class LabResultIngestionUseCase {
      * <p>Cardiology findings arrive from the technician's Tasklist form rather than here, so
      * this stands in for the automated analysers only.
      *
-     * @param orderId  the order being reported on
-     * @param testType the test that was run
+     * @param orderId      the order being reported on
+     * @param testType     the test that was run
+     * @param analyserDown when {@code true}, simulates the analyser failing <em>after</em> the
+     *                     order was accepted. This is the failure that makes compensation
+     *                     meaningful: unlike {@code diagnosticSystemDown}, which fails at ordering
+     *                     and leaves nothing booked, here a slot is already reserved and has to be
+     *                     released. Raises the same BPMN error, so the existing boundary event on
+     *                     the diagnostics sub-process catches it unchanged.
      * @return the ingested result
+     * @throws BusinessException when {@code analyserDown} is {@code true}
      */
-    public LabResult ingest(String orderId, String testType) {
+    public LabResult ingest(String orderId, String testType, boolean analyserDown) {
+        if (analyserDown) {
+            throw new BusinessException(LabOrderingUseCase.DIAGNOSTIC_SYSTEM_UNAVAILABLE,
+                    "Analyser unavailable while reporting " + testType + " for order " + orderId);
+        }
+
         String summary = switch (testType) {
             case "ECG" -> "Sinus rhythm, no ST elevation.";
             case "ECHO" -> "Ejection fraction within normal limits.";

@@ -33,6 +33,18 @@ either flake or waste time. Every `Await …` request re-invokes itself with
 `pm.execution.setNextRequest(pm.info.requestName)` and gives up after a bounded number of attempts
 using the `pollCount` variable.
 
+**Those budgets are attempt counts, not seconds.** `setNextRequest` re-fires immediately with no
+delay, and a request here averages ~140 ms, so a budget of 30 is roughly four seconds of wall clock
+— far too little for a step that waits on an OpenAI round-trip, the diagnostics fan-out, or the
+archive worker. Every guard is set to 150 (~20 s) for that reason. If you tighten one, tighten it
+in attempts and check what the step actually waits on first.
+
+Two requests poll where it might not be obvious. `01.7` waits for the ECG branch's `orderId`: that
+branch runs *in parallel* with the cardiology workup, so the order is not necessarily placed when
+the human task appears — asserting it immediately is a race against the very parallelism the stage
+exists to demonstrate. `01.23` waits for the instance to reach `COMPLETED`, which trails the final
+task by the archive worker plus indexing.
+
 If a run stalls on an `Await`, the instance is genuinely not where the collection expects — read
 `04 Utilities → List active elements` and `List incidents` before suspecting the collection.
 

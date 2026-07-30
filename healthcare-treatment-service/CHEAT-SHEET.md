@@ -59,10 +59,14 @@ the archive key.
 8. **Discharge Sign-off** — `attending-physician`, after the AI drafts the summary.
 9. *(auto)* Archiving writes a `patient_case` row.
 
-## Exception path
+## Exception and compensation paths
 
-Start with `"diagnosticSystemDown": true` → `LabTestOrderWorker` throws
-`DIAGNOSTIC_SYSTEM_UNAVAILABLE` → boundary error → **Escalate to Physician**.
+| Flag | Fails at | Result |
+|---|---|---|
+| `"diagnosticSystemDown": true` | ordering | BPMN error → **Escalate to Physician**. Nothing booked, so nothing to compensate. |
+| `"analyserSystemDown": true` | result ingestion | Order *was* booked → compensation cancels it → **Escalate to Physician**. |
+
+Neither raises an incident: both are business outcomes routed through a BPMN error.
 
 ## Verify the archive
 

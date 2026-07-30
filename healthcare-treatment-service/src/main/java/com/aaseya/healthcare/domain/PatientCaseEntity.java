@@ -1,4 +1,4 @@
-package com.aaseya.healthcare.infrastructure.persistence;
+package com.aaseya.healthcare.domain;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -13,9 +13,12 @@ import java.time.LocalDateTime;
 /**
  * JPA mapping for an archived case.
  *
- * <p>Kept in the infrastructure layer so persistence annotations never reach the domain. The
- * schema is owned by Flyway ({@code V1__patient_case.sql}); Hibernate runs in {@code validate}
- * mode and will fail fast if the two drift.
+ * <p>The persisted case aggregate. JPA annotations are allowed here — the architecture rule the
+ * domain must satisfy forbids Spring Web, Servlet and Camunda types, not {@code jakarta.persistence}
+ * — so the aggregate and its mapping stay in one place rather than being mirrored across layers.
+ *
+ * <p>The schema is owned by Flyway ({@code V2__patient_case.sql}); Hibernate runs in
+ * {@code validate} mode and will fail fast if the two drift.
  */
 @Entity
 @Table(name = "patient_case")

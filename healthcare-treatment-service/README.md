@@ -270,7 +270,23 @@ SELECT case_id, patient_name, care_plan, vitals_trend, archived_at FROM patient_
 
 Start an instance with `"diagnosticSystemDown": true`. `LabTestOrderWorker` raises
 `DIAGNOSTIC_SYSTEM_UNAVAILABLE`, the boundary error event fires, and **Escalate to Physician**
-appears in Tasklist.
+appears in Tasklist. No incident is raised — this is a business outcome routed through a BPMN error,
+not a technical fault.
+
+## Running the compensation path
+
+Start an instance with `"analyserSystemDown": true`. The order is placed successfully and the
+analyser then fails while reporting the result, so there is a booking to withdraw. Compensation runs
+inside the diagnostics sub-process before the error propagates, and the log shows the same order
+being cancelled:
+
+```
+Lab order placed             | orderId=ORD-ECG-896F8E
+Compensated diagnostic order | order=ORD-ECG-896F8E test=ECG status=CANCELLED
+```
+
+Escalation is then reached with the slot already released. The two flags differ deliberately:
+`diagnosticSystemDown` fails at ordering, so nothing is booked and there is nothing to compensate.
 
 ---
 

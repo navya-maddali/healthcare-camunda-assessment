@@ -92,12 +92,22 @@ clinician always reviews AI output before it reaches the record.
 degrading. The API key is a Camunda Console connector secret (`{{secrets.OPENAI_API_TOKEN}}`) and
 never appears in the model.
 
-**Response handling — a loose end.** The connector's full raw HTTP response is published as a
-process variable, not just the extracted text. `historySummary` is mapped correctly, but the
-`response` variable alongside it retains the entire OpenAI envelope: every response header,
-including `set-cookie` (`__cf_bm`), `x-request-id`, and the organisation and project identifiers.
-That is roughly 3 KB of noise per instance, persisted in process state and visible to anyone with
-Operate access. Mapping the result down to `historySummary` alone would be the tidier contract.
+**Response handling.** Both tasks use `resultExpression` rather than `resultVariable`, so only the
+extracted text becomes a process variable:
+
+```
+resultExpression = {historySummary: body.choices[1].message.content}
+```
+
+The earlier `resultVariable: response` published the entire OpenAI envelope alongside it — every
+response header including `set-cookie` (`__cf_bm`), `x-request-id`, and the organisation and project
+identifiers. Roughly 3 KB of noise per instance, persisted in process state and visible to anyone
+with Operate access.
+
+It was also a functional defect, not just untidiness. OpenAI returns `Access-Control-Expose-Headers`
+in two different casings, and any JSON parser that treats object keys case-insensitively — PowerShell
+and several .NET paths among them — rejects the whole document. `GET /api/v1/cases/{key}/variables`
+was therefore unparseable by a large class of clients until the mapping changed.
 
 ---
 
@@ -140,6 +150,28 @@ key that cannot separate the two will silently swallow loop iterations.
 Archiving additionally checks `existsByCaseId` and is backed by a unique constraint on
 `case_id` — the guard covers the common case, the constraint covers the concurrent race.
 
+**Compensation — and where it has to live.** A diagnostic order that was booked but never produced a
+result has to be withdrawn, or the department holds a slot for a test nobody will read and may still
+run it on a patient whose care has moved on. `Task_OrderTest` carries a compensation boundary event
+whose handler, `Task_CancelOrder`, calls `lab-order-cancellation`.
+
+The placement is not free choice. The first attempt threw compensation from the *parent* scope,
+after the boundary error on the diagnostics sub-process. It deployed, read correctly, and did
+nothing: a compensation throw unwinds activities that **completed** in its own scope, and an
+interrupted sub-process never completed — it takes its handlers down with it. The working model
+catches the analyser failure *inside* the sub-process, where `Task_OrderTest` genuinely completed
+and its handler is still subscribed, throws compensation there, and only then re-raises the error
+from an error end event so the outer boundary still escalates. Unwind first, escalate second.
+
+The handler is best-effort by design: a compensation handler that fails leaves the process stuck
+mid-unwind, which is worse than the fault being compensated. An unknown order id is reported as
+cancelled and any fault is logged rather than propagated.
+
+Two failure flags exist for this reason. `diagnosticSystemDown` fails at *ordering*, so nothing is
+ever booked and there is nothing to compensate — that is the plain BPMN-error path.
+`analyserSystemDown` fails at *ingestion*, after the booking succeeded, which is the only shape in
+which compensation is meaningful.
+
 **Message correlation.** `VitalsMonitoringUseCase` publishes `VitalsAlert` through the framework's
 `ProcessService` port with `correlationKey = caseId`, matching the `zeebe:subscription` declared
 on the message. The event sub-process is non-interrupting, so alerting never cancels treatment.
@@ -181,8 +213,6 @@ rather than in production.
 ## 6. Known limitations
 
 - The AI tasks require an `OPENAI_API_TOKEN` connector secret; without it they incident.
-- The AI connector's raw HTTP response is persisted as a process variable alongside the extracted
-  summary — see *Response handling* in §3.
 - Diagnostic results and the vitals feed are simulated deterministically — there is no real
   analyser or bedside-monitor integration.
 - The ad-hoc completion condition (`=consultsComplete = true`) is satisfied from the consult form.

@@ -78,7 +78,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="io.camunda:http-json:1" retries="2" />
         <zeebe:taskHeaders>
-          <zeebe:header key="resultVariable" value="response" />
+          <zeebe:header key="resultExpression" value="={historySummary: body.choices[1].message.content}" />
         </zeebe:taskHeaders>
         <zeebe:ioMapping>
           <zeebe:input source="bearer" target="authentication.type" />
@@ -88,7 +88,6 @@
           <zeebe:input source="=20" target="connectionTimeoutInSeconds" />
           <zeebe:input source="={&#34;Content-Type&#34;: &#34;application/json&#34;}" target="headers" />
           <zeebe:input source="={model: &#34;gpt-4o-mini&#34;, temperature: 0.2, messages: [{role: &#34;system&#34;, content: &#34;You are a clinical documentation assistant. Produce a concise, factual prior-history summary of at most 80 words. State only what the input supports; never invent findings.&#34;}, {role: &#34;user&#34;, content: &#34;Patient &#34; + patientName + &#34; (ID &#34; + patientId + &#34;) was admitted via &#34; + admissionType + &#34; with chief complaint &#34; + chiefComplaint + &#34;. Summarise relevant prior history, known allergies and clinical status on admission.&#34;}]}" target="body" />
-          <zeebe:output source="=response.body.choices[1].message.content" target="historySummary" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>Flow_2</bpmn:incoming>
@@ -162,11 +161,30 @@
             <zeebe:input source="=testType" target="testType" />
             <zeebe:input source="=caseId" target="caseId" />
             <zeebe:input source="=caseId + &#34;-result-&#34; + testType" target="businessKey" />
+            <zeebe:input source="=if (analyserSystemDown = null) then false else analyserSystemDown" target="analyserSystemDown" />
             <zeebe:output source="=testResult" target="testResult" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>SubFlow_ToIngest</bpmn:incoming>
         <bpmn:outgoing>SubFlow_LabJoin</bpmn:outgoing>
+      </bpmn:serviceTask>
+      <!--
+        Compensation for a booked order. Not on a sequence flow: the engine invokes the handler
+        only when compensation is thrown, once per branch that completed its order.
+      -->
+      <bpmn:boundaryEvent id="BoundaryCompensation_Order" name="Order placed" attachedToRef="Task_OrderTest">
+        <bpmn:compensateEventDefinition id="CompensateDef_Order" />
+      </bpmn:boundaryEvent>
+      <bpmn:serviceTask id="Task_CancelOrder" name="Cancel Lab Order" isForCompensation="true">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="lab-order-cancellation" retries="3" />
+          <zeebe:ioMapping>
+            <zeebe:input source="=orderId" target="orderId" />
+            <zeebe:input source="=testType" target="testType" />
+            <zeebe:input source="=caseId" target="caseId" />
+            <zeebe:input source="=caseId + &#34;-cancel-&#34; + testType" target="businessKey" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
       </bpmn:serviceTask>
       <bpmn:exclusiveGateway id="Gateway_DiagJoin">
         <bpmn:incoming>SubFlow_CardioJoin</bpmn:incoming>
@@ -187,6 +205,32 @@
       <bpmn:sequenceFlow id="SubFlow_ToIngest" sourceRef="Task_OrderTest" targetRef="Task_IngestResult" />
       <bpmn:sequenceFlow id="SubFlow_LabJoin" sourceRef="Task_IngestResult" targetRef="Gateway_DiagJoin" />
       <bpmn:sequenceFlow id="SubFlow_DiagEnd" sourceRef="Gateway_DiagJoin" targetRef="SubDiag_End" />
+      <!--
+        Compensation has to be thrown from the scope that owns the completed activity. Catching the
+        analyser failure here — rather than letting it reach the boundary event on the sub-process —
+        keeps this branch alive long enough to unwind it: Task_OrderTest has completed in this scope,
+        so its handler is still subscribed. Throwing from the parent instead does nothing, because an
+        interrupted sub-process never completed and takes its handlers down with it.
+
+        The error end event then re-raises the same error so the outer boundary still escalates.
+      -->
+      <bpmn:boundaryEvent id="BoundaryError_Ingest" name="Analyser Down" attachedToRef="Task_IngestResult">
+        <bpmn:outgoing>SubFlow_ErrIngest</bpmn:outgoing>
+        <bpmn:errorEventDefinition id="ErrDef_Ingest" errorRef="Error_DiagSystem" />
+      </bpmn:boundaryEvent>
+      <bpmn:intermediateThrowEvent id="Throw_CompensateBranch" name="Cancel this order">
+        <bpmn:incoming>SubFlow_ErrIngest</bpmn:incoming>
+        <bpmn:outgoing>SubFlow_ToErrEnd</bpmn:outgoing>
+        <bpmn:compensateEventDefinition id="CompensateDef_Branch" />
+      </bpmn:intermediateThrowEvent>
+      <bpmn:endEvent id="ErrEnd_Branch" name="Diagnostics Failed">
+        <bpmn:incoming>SubFlow_ToErrEnd</bpmn:incoming>
+        <bpmn:errorEventDefinition id="ErrDef_BranchEnd" errorRef="Error_DiagSystem" />
+      </bpmn:endEvent>
+      <bpmn:sequenceFlow id="SubFlow_ErrIngest" sourceRef="BoundaryError_Ingest" targetRef="Throw_CompensateBranch" />
+      <bpmn:sequenceFlow id="SubFlow_ToErrEnd" sourceRef="Throw_CompensateBranch" targetRef="ErrEnd_Branch" />
+      <!-- Artifacts must follow every flow element; the schema enforces that ordering. -->
+      <bpmn:association id="Assoc_CompensateOrder" associationDirection="One" sourceRef="BoundaryCompensation_Order" targetRef="Task_CancelOrder" />
     </bpmn:subProcess>
     <bpmn:boundaryEvent id="BoundaryError_Diag" name="System Down" attachedToRef="SubProcess_Diagnostics">
       <bpmn:outgoing>Flow_Err1</bpmn:outgoing>
@@ -204,6 +248,10 @@
     <bpmn:endEvent id="ErrEnd_1" name="Escalation End">
       <bpmn:incoming>Flow_Err2</bpmn:incoming>
     </bpmn:endEvent>
+    <!--
+      Escalation is reached with the booking already unwound: compensation runs inside the
+      diagnostics sub-process, before the error propagates here.
+    -->
     <bpmn:sequenceFlow id="Flow_Err1" sourceRef="BoundaryError_Diag" targetRef="Task_EscalatePhysician" />
     <bpmn:sequenceFlow id="Flow_Err2" sourceRef="Task_EscalatePhysician" targetRef="ErrEnd_1" />
     <bpmn:userTask id="Task_TreatmentPlan" name="Define Treatment Plan">
@@ -361,7 +409,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="io.camunda:http-json:1" retries="2" />
         <zeebe:taskHeaders>
-          <zeebe:header key="resultVariable" value="response" />
+          <zeebe:header key="resultExpression" value="={dischargeSummary: body.choices[1].message.content}" />
         </zeebe:taskHeaders>
         <zeebe:ioMapping>
           <zeebe:input source="bearer" target="authentication.type" />
@@ -371,7 +419,6 @@
           <zeebe:input source="=20" target="connectionTimeoutInSeconds" />
           <zeebe:input source="={&#34;Content-Type&#34;: &#34;application/json&#34;}" target="headers" />
           <zeebe:input source="={model: &#34;gpt-4o-mini&#34;, temperature: 0.2, messages: [{role: &#34;system&#34;, content: &#34;You are a clinical documentation assistant. Draft a discharge summary followed by a HOME CARE section as short bullet points. Be factual and use only the supplied details.&#34;}, {role: &#34;user&#34;, content: &#34;Patient: &#34; + patientName + &#34;. Care plan: &#34; + carePlan + &#34;. Treatment administered: &#34; + treatmentPlan + &#34;. Final vitals trend: &#34; + vitalsTrend + &#34;. Admission history: &#34; + historySummary + &#34;.&#34;}]}" target="body" />
-          <zeebe:output source="=response.body.choices[1].message.content" target="dischargeSummary" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>Flow_ReadyYes</bpmn:incoming>
@@ -489,7 +536,7 @@
         <dc:Bounds x="740" y="380" width="150" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="SubProcess_Diagnostics_di" bpmnElement="SubProcess_Diagnostics" isExpanded="true" bioc:stroke="#1e88e5" bioc:fill="#e8f2fc" color:background-color="#e8f2fc" color:border-color="#1e88e5">
-        <dc:Bounds x="950" y="645" width="700" height="260" />
+        <dc:Bounds x="950" y="645" width="700" height="340" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="SubDiag_Start_di" bpmnElement="SubDiag_Start" bioc:stroke="#43a047" bioc:fill="#e8f5e9" color:background-color="#e8f5e9" color:border-color="#43a047">
         <dc:Bounds x="990" y="767" width="36" height="36" />
@@ -670,13 +717,52 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BoundaryError_Diag_di" bpmnElement="BoundaryError_Diag" bioc:stroke="#e53935" bioc:fill="#ffebee" color:background-color="#ffebee" color:border-color="#e53935">
-        <dc:Bounds x="1492" y="887" width="36" height="36" />
+        <dc:Bounds x="1492" y="967" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1533" y="894" width="72" height="14" />
+          <dc:Bounds x="1533" y="974" width="72" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryCompensation_Order_di" bpmnElement="BoundaryCompensation_Order">
+        <dc:Bounds x="1252" y="847" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1293" y="854" width="66" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_CancelOrder_di" bpmnElement="Task_CancelOrder" bioc:stroke="#43a047" bioc:fill="#e8f5e9" color:background-color="#e8f5e9" color:border-color="#43a047">
+        <dc:Bounds x="1180" y="895" width="140" height="70" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryError_Ingest_di" bpmnElement="BoundaryError_Ingest" bioc:stroke="#e53935" bioc:fill="#ffebee" color:background-color="#ffebee" color:border-color="#e53935">
+        <dc:Bounds x="1422" y="847" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1463" y="854" width="70" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Throw_CompensateBranch_di" bpmnElement="Throw_CompensateBranch">
+        <dc:Bounds x="1422" y="905" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1400" y="948" width="80" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ErrEnd_Branch_di" bpmnElement="ErrEnd_Branch" bioc:stroke="#e53935" bioc:fill="#ffebee" color:background-color="#ffebee" color:border-color="#e53935">
+        <dc:Bounds x="1552" y="905" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1530" y="948" width="82" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="SubFlow_ErrIngest_di" bpmnElement="SubFlow_ErrIngest">
+        <di:waypoint x="1440" y="883" />
+        <di:waypoint x="1440" y="905" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SubFlow_ToErrEnd_di" bpmnElement="SubFlow_ToErrEnd">
+        <di:waypoint x="1458" y="923" />
+        <di:waypoint x="1552" y="923" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Assoc_CompensateOrder_di" bpmnElement="Assoc_CompensateOrder">
+        <di:waypoint x="1270" y="883" />
+        <di:waypoint x="1270" y="895" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="Flow_Err1_di" bpmnElement="Flow_Err1">
-        <di:waypoint x="1510" y="923" />
+        <di:waypoint x="1510" y="1003" />
         <di:waypoint x="1510" y="1105" />
         <di:waypoint x="1560" y="1105" />
       </bpmndi:BPMNEdge>
