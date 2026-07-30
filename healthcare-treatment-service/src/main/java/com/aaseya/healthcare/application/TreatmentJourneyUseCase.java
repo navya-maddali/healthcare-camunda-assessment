@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Drives a treatment journey from the service side.
@@ -300,11 +301,20 @@ public class TreatmentJourneyUseCase {
     /**
      * Raises a vitals alert against a case.
      *
+     * <p>Every alert carries an {@code alertId}, which becomes the handler's idempotency key.
+     * Without one the framework guard keys on {@code caseId} alone and silently swallows every
+     * alert after the first — see {@code Task_HandleAlert} in the BPMN. Callers that need an
+     * at-most-once guarantee across their own retries should supply their own {@code alertId};
+     * omitting it means each call raises a distinct alert, which is what a bedside monitor
+     * reporting a fresh breach actually wants.
+     *
      * @param caseId    correlation key of the running journey
      * @param variables alert payload
      */
     public void raiseVitalsAlert(String caseId, Map<String, Object> variables) {
-        orchestration.publishMessage(VITALS_ALERT_MESSAGE, caseId, variables);
+        Map<String, Object> payload = new LinkedHashMap<>(variables);
+        payload.putIfAbsent("alertId", caseId + "-manual-" + UUID.randomUUID());
+        orchestration.publishMessage(VITALS_ALERT_MESSAGE, caseId, payload);
     }
 
     /**

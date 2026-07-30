@@ -48,9 +48,11 @@ public class VitalsMonitoringUseCase {
      * @param patientId     patient under observation
      * @param caseId        correlation key for the alert message
      * @param priorAttempts failed discharge-readiness checks so far
+     * @param alertId       idempotency key for the alert this pass may raise; must be unique per
+     *                      monitoring pass and stable across retries of the same pass
      * @return the trend and whether an alert was raised
      */
-    public Outcome monitor(String patientId, String caseId, int priorAttempts) {
+    public Outcome monitor(String patientId, String caseId, int priorAttempts, String alertId) {
         VitalsReading reading = observe(patientId, caseId, priorAttempts);
         VitalsTrend trend = VitalsAssessment.trendFor(reading, priorAttempts);
         boolean breached = VitalsAssessment.isBreached(reading);
@@ -60,7 +62,13 @@ public class VitalsMonitoringUseCase {
                     "VitalsAlert",
                     caseId,
                     Map.of("alertMessage", "Vitals threshold breached",
-                            "vitalsTrend", trend.name()),
+                            "vitalsTrend", trend.name(),
+                            // The handler uses alertId as its idempotency key. Keyed on caseId
+                            // alone the framework guard treats the second and every later alert on
+                            // a case as a replay and completes it silently, so a repeat breach
+                            // produces no handler invocation at all. Derived from this pass's own
+                            // businessKey so it is unique per pass and stable across retries.
+                            "alertId", alertId),
                     Duration.ofMinutes(10),
                     null));
         }

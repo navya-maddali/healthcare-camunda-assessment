@@ -157,13 +157,39 @@ The vitals check needs the same treatment for a different reason. It sits inside
 loop, so the *same* element is legitimately reached more than once. Inheriting the process-wide
 `businessKey` made both halves of the key identical on every pass, and the guard could not tell a
 second pass from a redelivery of the first — vitals never refreshed, the discharge gate never
-opened, and the loop could not terminate. Folding the attempt counter in
-(`=caseId + "-vitals-" + string(dischargeAttemptCount)`) distinguishes them: a genuine redelivery
-carries the same count and is still suppressed, a new pass is not. The general rule — at-least-once
-delivery is about the same *job* arriving twice, not the same *element* being reached twice, and a
-key that cannot separate the two will silently swallow loop iterations.
+opened, and the loop could not terminate. Folding the attempt counter in distinguishes them: a
+genuine redelivery carries the same count and is still suppressed, a new pass is not. The general
+rule — at-least-once delivery is about the same *job* arriving twice, not the same *element* being
+reached twice, and a key that cannot separate the two will silently swallow loop iterations.
 Archiving additionally checks `existsByCaseId` and is backed by a unique constraint on
 `case_id` — the guard covers the common case, the constraint covers the concurrent race.
+
+**Two more instances of the same trap, found by the 2026-07-31 scenario sweep.** Both were silent:
+no incident, no failed request, nothing in the process state to look at. Only the framework's
+`Replayed job detected … — completing silently` log line gave them away.
+
+*The alert handler.* `Task_HandleAlert` mapped `businessKey = caseId`, so the guard keyed every
+alert on a case identically and handled **only the first one, ever**. The second and every later
+`VitalsAlert` — whether raised by the monitor on a repeat breach or posted to
+`/cases/{caseId}/vitals-alerts` — correlated, started the event sub-process, created the job, and
+was then completed without running. A clinical process that silently discards a repeat
+deterioration alert has the worst failure mode available to it. Every alert now carries an
+`alertId` and the handler keys on that.
+
+*The counter reset defeating its own key.* Folding `dischargeAttemptCount` into the vitals key
+assumes the counter is monotonic. It is not — `Task_ClinDirectorReview` deliberately resets it to
+0, and that reset regenerates the key the *first* pass already consumed. So the vitals pass
+immediately after a director review was always skipped: `vitalsTrend` kept its stale value and the
+discharge gate then decided on vitals nobody took. That is precisely the pass that matters most,
+the one right after a senior clinician intervened. The key is now
+`=caseId + "-vitals-" + directorReviewCount + "-" + dischargeAttemptCount`, where
+`directorReviewCount` is a monotonic generation counter the review task increments and never
+resets. The alert id is derived from that same key, so it inherits the uniqueness rather than
+re-deriving it and drifting again.
+
+The lesson generalises past this process: **an idempotency key built from a mutable process
+variable is only as sound as that variable's monotonicity**, and a key that silently collides
+degrades into "skip the work", which looks identical to success from every angle except the log.
 
 **Compensation — and where it has to live.** A diagnostic order that was booked but never produced a
 result has to be withdrawn, or the department holds a slot for a test nobody will read and may still
@@ -235,3 +261,16 @@ rather than in production.
 - Multi-instance results are not aggregated into an output collection; each branch writes
   `testResult` within its own scope. Collecting them would need the cardiology branch to emit the
   same shape as the automated branches.
+- **`caseId` is not enforced unique at admission.** `POST /cases` accepts a `caseId` that already
+  has a live instance and returns `201`. That matters more than it looks: `caseId` is the
+  `VitalsAlert` correlation key, so an alert raised against a duplicated id correlates to only one
+  of the instances, and it is the archive key, which carries a `UNIQUE` constraint — so the second
+  instance to reach `Task_Archive` fails the insert and raises an incident at the very last step of
+  a completed journey. Found by the 2026-07-31 sweep and left as-is deliberately: rejecting a
+  duplicate changes the admission contract, and whether it should be a `409`, a redirect to the
+  existing instance, or an accepted re-admission is a clinical decision rather than a technical
+  one. The fix is a lookup in `TreatmentJourneyUseCase.admit` once that call is made.
+- `GET /cases/{key}/variables` returns `200 {}` for an unknown instance key while
+  `GET /cases/{key}` returns `404`. The variables route cannot distinguish "no such instance" from
+  "indexed but no variables yet" without a second lookup, and the polling clients depend on the
+  permissive form, so the inconsistency is deliberate.

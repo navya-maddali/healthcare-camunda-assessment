@@ -318,7 +318,15 @@
           <zeebe:ioMapping>
             <zeebe:input source="=patientId" target="patientId" />
             <zeebe:input source="=caseId" target="caseId" />
-            <zeebe:input source="=caseId + &#34;-vitals-&#34; + string(if dischargeAttemptCount = null then 0 else dischargeAttemptCount)" target="businessKey" />
+            <!--
+              The idempotency key must be unique per monitoring pass. dischargeAttemptCount alone
+              is not: Task_ClinDirectorReview resets it to 0, which regenerates a key the first
+              pass already consumed, and the framework guard then completes that job silently
+              without observing the patient. vitalsTrend keeps its stale value and the discharge
+              gate decides on vitals nobody took — worst of all on the pass right after a senior
+              clinician intervened. directorReviewCount never resets, so the pair stays unique.
+            -->
+            <zeebe:input source="=caseId + &#34;-vitals-&#34; + string(if directorReviewCount = null then 0 else directorReviewCount) + &#34;-&#34; + string(if dischargeAttemptCount = null then 0 else dischargeAttemptCount)" target="businessKey" />
             <zeebe:output source="=vitalsTrend" target="vitalsTrend" />
             <zeebe:output source="=vitalsAlertRaised" target="vitalsAlertRaised" />
           </zeebe:ioMapping>
@@ -340,8 +348,18 @@
             <zeebe:ioMapping>
               <zeebe:input source="=alertMessage" target="alertMessage" />
               <zeebe:input source="=vitalsTrend" target="vitalsTrend" />
-              <!-- Derived locally now that Task_Registration no longer publishes businessKey. -->
-              <zeebe:input source="=caseId" target="businessKey" />
+              <!--
+                businessKey is the framework's idempotency key: BaseWorker calls
+                guard.check(businessKey, elementId) and, on a hit, completes the job silently
+                without running doWork. Keying on caseId alone therefore handled the first
+                vitals alert on a case and swallowed every one after it — a repeat breach
+                produced no handler invocation at all, which is the failure mode this process
+                least wants. alertId varies per alert (per monitoring pass for the worker,
+                per call for the REST endpoint) so genuine job retries still dedupe while
+                distinct alerts each get handled. The null guard keeps an alert published
+                without one from raising an incident.
+              -->
+              <zeebe:input source="=if alertId = null then caseId else alertId" target="businessKey" />
             </zeebe:ioMapping>
           </bpmn:extensionElements>
           <bpmn:incoming>VitalsAlert_F1</bpmn:incoming>
@@ -407,6 +425,13 @@
         -->
         <zeebe:ioMapping>
           <zeebe:output source="=0" target="dischargeAttemptCount" />
+          <!--
+            Monotonic generation counter. Resetting dischargeAttemptCount above is what ends the
+            escalate -> revise -> escalate loop, but it also makes that counter unusable on its own
+            as an idempotency key. This one only ever increments, so Task_VitalsMonitor can pair
+            the two and stay unique across any number of director reviews.
+          -->
+          <zeebe:output source="=if directorReviewCount = null then 1 else directorReviewCount + 1" target="directorReviewCount" />
           <zeebe:output source="=treatmentPlan" target="treatmentPlan" />
           <zeebe:output source="=if directorDecision = null then &#34;&#34; else directorDecision" target="directorDecision" />
           <zeebe:output source="=if directorNotes = null then &#34;&#34; else directorNotes" target="directorNotes" />

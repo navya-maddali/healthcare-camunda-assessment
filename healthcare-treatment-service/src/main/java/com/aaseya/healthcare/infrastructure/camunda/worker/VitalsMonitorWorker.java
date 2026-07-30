@@ -48,8 +48,12 @@ public class VitalsMonitorWorker extends BaseWorker<VitalsMonitorWorker.VitalsVa
      * @param caseId                correlation key for the alert message
      * @param dischargeAttemptCount failed discharge-readiness checks so far; {@code null} on the
      *                              first pass, before the counter script task has run
+     * @param businessKey           this pass's idempotency key, mapped in the BPMN and already
+     *                              unique per monitoring pass; reused as the seed for the alert id
+     *                              so the alert inherits exactly the same uniqueness
      */
-    public record VitalsVars(String patientId, String caseId, Integer dischargeAttemptCount) {
+    public record VitalsVars(String patientId, String caseId, Integer dischargeAttemptCount,
+                             String businessKey) {
     }
 
     @Override
@@ -66,8 +70,12 @@ public class VitalsMonitorWorker extends BaseWorker<VitalsMonitorWorker.VitalsVa
     protected WorkResult doWork(VitalsVars vars, ActivatedJob job) {
         int priorAttempts = vars.dischargeAttemptCount() == null ? 0 : vars.dischargeAttemptCount();
 
+        String alertId = (vars.businessKey() == null
+                ? vars.caseId() + "-vitals-" + priorAttempts
+                : vars.businessKey()) + "-alert";
+
         VitalsMonitoringUseCase.Outcome outcome =
-                monitoring.monitor(vars.patientId(), vars.caseId(), priorAttempts);
+                monitoring.monitor(vars.patientId(), vars.caseId(), priorAttempts, alertId);
 
         if (outcome.breached()) {
             log.warn("Vitals alert | patient={} HR={} SpO2={}",

@@ -463,9 +463,13 @@
                   "  pm.test('alert handler ran', () => pm.expect(v.alertMessage).to.be.a('string'));",
                   "",
                   "  // The vitals task scopes its idempotency key per loop pass, but that is a zeebe:input",
-                  "  // mapping and therefore local to the task scope - it never reaches process variables,",
-                  "  // so only the process-wide key is visible here. The scoping is proven instead by the",
-                  "  pm.test('process businessKey is the caseId', () => pm.expect(v.businessKey).to.eql(pm.environment.get('caseId')));",
+                  "  // mapping, but the alert handler inside the event sub-process maps one too, and",
+                  "  // that one does surface here. It must NOT be the bare caseId: keyed that way the",
+                  "  // framework guard treats every alert after the first on a case as a replay and",
+                  "  // completes it silently, so a repeat breach is never handled. It is now derived",
+                  "  // from the monitoring pass that raised it - caseId-vitals-<review>-<attempt>-alert.",
+                  "  pm.test('alert key is scoped per alert, not per case', () => pm.expect(v.businessKey).to.eql(pm.environment.get('caseId') + '-vitals-0-0-alert'));",
+                  "  pm.test('alert key is not the bare caseId', () => pm.expect(v.businessKey).to.not.eql(pm.environment.get('caseId')));",
                   "",
                   "  console.log('Pass 1: trend=' + v.vitalsTrend + ' businessKey=' + v.businessKey + ' attempts=' + v.dischargeAttemptCount);",
                   "  console.log('The discharge gate rejects, the counter increments, and the journey loops back to treatment planning.');",
@@ -637,9 +641,10 @@
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
                   "const v = pm.response.json();",
                   "",
-                  "// Wait for the second vitals check to land. Its key is scoped to attempt 1, so it is",
+                  "// Wait for the second vitals check to land. Its key is scoped to review 0 / attempt 1,",
+                  "// so it is",
                   "// a distinct execution rather than a replay of attempt 0.",
-                  "const secondPassKey = pm.environment.get('caseId') + '-vitals-1';",
+                  "const secondPassKey = pm.environment.get('caseId') + '-vitals-0-1';",
                   "",
                   "if (v.businessKey !== secondPassKey) {",
                   "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
@@ -673,7 +678,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["cases", "{{processInstanceKey}}", "variables"]
             },
-            "description": "The heart of the regression.\n\nThe vitals element carries an input mapping that folds the attempt counter into the idempotency key, so each loop pass is distinguishable. Without it both passes key on (caseId, Task_VitalsMonitor), the second is misread as an at-least-once redelivery and completes without running, and vitalsTrend stays DETERIORATING forever.\n\nThat mapping is a zeebe:input, so it is scoped to the task and never reaches process variables - businessKey here is the process-wide key, the caseId. The scoping is proven by behaviour instead: this pass reports DETERIORATING and 01.18 confirms the next one recovers."
+            "description": "The heart of the regression.\n\nThe vitals element folds both counters into its idempotency key - caseId-vitals-<directorReviewCount>-<dischargeAttemptCount>. Without the attempt counter both passes key on (caseId, Task_VitalsMonitor), the second is misread as an at-least-once redelivery and completes without running, and vitalsTrend stays DETERIORATING forever. Without the review counter the same thing happens one step later: Task_ClinDirectorReview resets dischargeAttemptCount to 0, which regenerates the first pass's key, so the vitals check immediately after a senior clinician intervenes is silently skipped and the discharge gate decides on a stale trend.\n\nbusinessKey visible here is the alert handler's, which is derived from the monitoring pass that raised the alert. 01.18 checks the vitals task's own key for the second pass."
           }
         },
         {

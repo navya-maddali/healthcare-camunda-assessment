@@ -91,11 +91,11 @@ Postman environment targets; `application.yml` defaults to 8080 without it.
 Expected on startup:
 
 ```
-Flyway   : Successfully applied 2 migrations to schema "public", now at version v2
+Flyway   : Successfully applied 3 migrations to schema "public", now at version v3
 Deployed : <healthcare-treatment-journey:N>, 2 decisions, 8 forms
-Workers  : lab-test-ordering, lab-result-ingestion, vitals-monitoring,
-           vitals-alert-handler, record-archiving
-Started HealthcareTreatmentApplication in ~17 seconds
+Workers  : lab-test-ordering, lab-result-ingestion, lab-order-cancellation,
+           vitals-monitoring, vitals-alert-handler, record-archiving
+Started HealthcareTreatmentApplication in ~13 seconds
 ```
 
 ```bash
@@ -149,6 +149,20 @@ curl -X POST http://localhost:8081/api/v1/cases/$KEY/tasks/completion \
 
 That trail outlives both the engine's history retention and the instance itself — cancelling a
 journey does not erase what was submitted before it was cancelled.
+
+**Raising a vitals alert.** `POST /cases/{caseId}/vitals-alerts` returns `202` and publishes the
+`VitalsAlert` message. Two things are worth knowing before you call it:
+
+- The event sub-process is nested **inside Treatment Execution**, so the alert only correlates while
+  that sub-process is active — that is, while Treatment Administration is waiting or vitals are
+  being taken. Published outside that window there is no open subscription to catch it.
+- Each call raises a **distinct** alert. Supply your own `alertId` in the payload if you need the
+  call to be idempotent across your retries; omit it and one is generated per call. The handler uses
+  `alertId` as its idempotency key, which is what allows a repeat deterioration to be handled
+  instead of silently swallowed.
+
+The start event is non-interrupting, so an alert never cancels treatment — the handler runs
+alongside the waiting task.
 
 ---
 
@@ -244,9 +258,19 @@ Two placements are load-bearing rather than stylistic:
 |---|---|---|
 | `lab-test-ordering` | `LabTestOrderWorker` | 3 |
 | `lab-result-ingestion` | `LabResultIngestionWorker` | 3 |
+| `lab-order-cancellation` | `LabOrderCancelWorker` | 3 |
 | `vitals-monitoring` | `VitalsMonitorWorker` | 3 |
 | `vitals-alert-handler` | `VitalsAlertHandlerWorker` | 1 |
 | `record-archiving` | `RecordArchiveWorker` | 3 |
+
+**Idempotency keys are per-task, and getting one wrong fails silently.** `BaseWorker` short-circuits
+a job whose `(businessKey, elementId)` pair it has already seen, so a `businessKey` that repeats
+when the work does not is indistinguishable from "skip this step". Three tasks therefore map keys
+that are *not* the `caseId`: the diagnostic branches fold in `testType`, `Task_VitalsMonitor` folds
+in both `directorReviewCount` and `dischargeAttemptCount`, and the alert handler keys on a per-alert
+`alertId`. The only symptom of a collision is
+`Replayed job detected … — completing silently` in the log. See [`TEST-REPORT.md`](TEST-REPORT.md)
+for two real instances of this and how they were caught.
 
 The two AI steps are **not** workers — they are Camunda AI Connector tasks
 (`io.camunda:http-json:1`).
@@ -355,6 +379,15 @@ hardest when the source is correct but was never redeployed. See *Deploy the pro
 **AI tasks incident** — the `OPENAI_API_TOKEN` connector secret is missing in Camunda Console.
 Note the name: it is `OPENAI_API_TOKEN`, not `OPENAI_API_KEY`.
 
+**A step appears to run but its variables never change** — and there is no incident, no failed
+request and nothing wrong-looking in Operate. Grep the log for
+`Replayed job detected … — completing silently`. That is the framework's idempotency guard
+recognising a `(businessKey, elementId)` pair it has seen before and completing the job **without
+running the worker**. It means the task's `businessKey` mapping repeats a value on a genuinely new
+execution — the usual causes are keying on `caseId` alone where an element is reached more than
+once, or folding in a counter that later gets reset. Fix the key mapping in the BPMN, not the
+worker. Two real examples are written up in [`TEST-REPORT.md`](TEST-REPORT.md).
+
 **`JAVA_HOME is not defined correctly`** — `mvn` fails before Spring Boot starts. The project
 needs JDK 21; check that `JAVA_HOME` points at a JDK that actually exists on the machine.
 
@@ -369,6 +402,9 @@ needs JDK 21; check that `JAVA_HOME` points at a JDK that actually exists on the
 - [`PROJECT-UNDERSTANDING.md`](PROJECT-UNDERSTANDING.md) — what the assessment asks for and where
   each requirement is implemented.
 - [`RUN-WALKTHROUGH.md`](RUN-WALKTHROUGH.md) — the same journey driven with curl instead of Postman.
+- [`TEST-REPORT.md`](TEST-REPORT.md) — the 2026-07-31 end-to-end scenario sweep: every path,
+  every DMN rule, both failure modes, the negative API contract, and the two silent idempotency
+  defects it uncovered.
 - [`DEMO-SCRIPT.md`](DEMO-SCRIPT.md) — a ~12 minute presented walkthrough, with the point of each beat.
 - [`CHEAT-SHEET.md`](CHEAT-SHEET.md) — one-page reference: endpoints, payloads, task order, flags.
 - [`postman/POSTMAN-RUN.md`](postman/POSTMAN-RUN.md) — running the collection unattended and what
