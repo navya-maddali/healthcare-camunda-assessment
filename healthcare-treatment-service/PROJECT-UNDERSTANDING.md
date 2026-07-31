@@ -23,8 +23,8 @@ discharge on an objective decision rather than a judgement call.
 | Multi-instance parallel diagnostics, cardinality from triage | `SubProcess_Diagnostics`, collection `=diagnosticTests` |
 | Ad-hoc sub-process for specialist consults | `AdHoc_Consultations` — neuro / endo / physio |
 | Two DMN tables, invoked from business rule tasks | `triage-care-pathway` (FIRST), `discharge-readiness` (UNIQUE) |
-| Two AI Connector steps with process-variable prompts | `Task_HistorySummary`, `Task_DischargeSummary` (`io.camunda:http-json:1`) |
-| Safe looping on the not-ready path | Attempt counter + threshold gateway + director reset |
+| Two AI Connector steps with process-variable prompts | `Task_HistorySummary`, `Task_DischargeSummary` (`io.camunda.agenticai:aiagent:1`, provider `openai`, model from `=aiModel`) |
+| Safe looping on the not-ready path | Attempt counter in `Task_DischargeReady`'s output mapping + three-way `Gateway_Ready` + director reset |
 | Tasklist forms with correct candidate groups | 8 `.form` files under `forms/` |
 | Spring Boot 4 job workers on the framework | 5 workers extending `BaseWorker` |
 | Message correlation from the vitals worker | `VitalsAlert`, `correlationKey = caseId` |

@@ -191,27 +191,42 @@ The lesson generalises past this process: **an idempotency key built from a muta
 variable is only as sound as that variable's monotonicity**, and a key that silently collides
 degrades into "skip the work", which looks identical to success from every angle except the log.
 
-**Compensation — and where it has to live.** A diagnostic order that was booked but never produced a
-result has to be withdrawn, or the department holds a slot for a test nobody will read and may still
-run it on a patient whose care has moved on. `Task_OrderTest` carries a compensation boundary event
-whose handler, `Task_CancelOrder`, calls `lab-order-cancellation`.
+**Compensation — modelled, then deliberately removed.** An earlier revision compensated a booked
+diagnostic order: `Task_OrderTest` carried a compensation boundary event whose handler,
+`Task_CancelOrder`, called `lab-order-cancellation` when the analyser failed after the slot was
+reserved. It worked. It was removed anyway.
 
-The placement is not free choice. The first attempt threw compensation from the *parent* scope,
-after the boundary error on the diagnostics sub-process. It deployed, read correctly, and did
-nothing: a compensation throw unwinds activities that **completed** in its own scope, and an
-interrupted sub-process never completed — it takes its handlers down with it. The working model
-catches the analyser failure *inside* the sub-process, where `Task_OrderTest` genuinely completed
-and its handler is still subscribed, throws compensation there, and only then re-raises the error
-from an error end event so the outer boundary still escalates. Unwind first, escalate second.
+The reason is scope, not difficulty. UC2's capability matrix marks compensation/rollback "–" for
+Health (it is required of UC1 Loan and UC5 Claims), and the deliverables ask for compensation "where
+the flow indicates it". This flow does not indicate it: a diagnostics failure has exactly one correct
+clinical outcome — escalate to the attending physician — and reaching it is what matters to the
+patient. The unwind step added a flow node, a job worker and a whole BPMN concept to the diagram
+without changing where the case ended up. Against a rubric whose joint-largest criterion rewards a
+clean, readable model, that is a net cost. Both failure flags now reach the same escalation:
+`diagnosticSystemDown` fails at ordering, `analyserSystemDown` at ingestion, and the branch's error
+end event propagates either to the sub-process boundary.
 
-The handler is best-effort by design: a compensation handler that fails leaves the process stuck
-mid-unwind, which is worse than the fault being compensated. An unknown order id is reported as
-cancelled and any fault is logged rather than propagated.
+One finding from building it is worth keeping even though the code is gone. The first attempt threw
+compensation from the *parent* scope, after the boundary error on the diagnostics sub-process. It
+deployed, read correctly, and did nothing — **a compensation throw unwinds only activities that
+completed in its own scope, and an interrupted sub-process never completed; it takes its handlers
+down with it.** The working version had to catch the failure *inside* the sub-process, where
+`Task_OrderTest` had genuinely completed and its handler was still subscribed, and only then re-raise
+the error so the outer boundary still escalated. If compensation is ever needed here, that is where
+it goes.
 
-Two failure flags exist for this reason. `diagnosticSystemDown` fails at *ordering*, so nothing is
-ever booked and there is nothing to compensate — that is the plain BPMN-error path.
-`analyserSystemDown` fails at *ingestion*, after the booking succeeded, which is the only shape in
-which compensation is meaningful.
+**The discharge gate, and a propagation trap.** `Task_DischargeReady` increments
+`dischargeAttemptCount` in its own output mapping rather than through a separate script task, and a
+single three-way `Gateway_Ready` then routes to discharge, to clinical director review above three
+attempts, or back to plan revision as the default. That is two fewer nodes than the earlier
+check → increment → check-max chain, for identical behaviour.
+
+The trap is worth recording because it is silent and non-obvious: **the moment a task declares an
+`ioMapping` output, its `resultVariable` stops propagating automatically** — the decision result
+becomes local to the task scope and only mapped outputs reach the parent. Adding the counter output
+alone would have left `dischargeResult` undefined at the gateway and raised an incident on a
+condition that had not changed. The mapping therefore re-exports `=dischargeResult` explicitly
+alongside the counter.
 
 **Message correlation.** `VitalsMonitoringUseCase` publishes `VitalsAlert` through the framework's
 `ProcessService` port with `correlationKey = caseId`, matching the `zeebe:subscription` declared

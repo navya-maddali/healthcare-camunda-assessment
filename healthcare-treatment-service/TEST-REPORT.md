@@ -1,5 +1,14 @@
 # End-to-End Test Report — 2026-07-31
 
+> **Superseded — this report records process version 28, before the UC2 scope simplification.**
+> It is kept as the evidence of what was tested and what it found, not as a description of the
+> current model. Three things below no longer exist: the compensation path (**S4**), the
+> `lab-order-cancellation` worker, and `Gateway_MaxAttempts` (the attempt counter moved into
+> `Task_DischargeReady`'s output mapping and the loop is now routed by a three-way `Gateway_Ready`).
+> The AI steps have also moved from the HTTP connector to the AI Agent connector. Everything else —
+> S1, S2, S3, S5–S8, and both idempotency defects — still applies. **Re-run this sweep after the
+> next deployment and replace this file.** See `USE-CASE-2.md` for why compensation was dropped.
+
 A full scenario sweep of the deployed journey: clean build, real deployment to the `sin-1` Camunda
 8.9 SaaS cluster, and every reachable path driven through the Java REST API against live Zeebe,
 Operate and Tasklist data. Two silent defects were found and fixed; the run below is the post-fix
@@ -45,7 +54,7 @@ Version 26 was the starting point. 27 and 28 are the two fixes described below.
 | S1 | Happy path, full | consults + revise loop + discharge + archive | COMPLETED, 9 audit rows, 0 incidents |
 | S2 | Both DMN tables, every rule | direct `/decisions/{id}/evaluation` | 12/12 rules + the UNIQUE no-match hole |
 | S3 | Exception path | `diagnosticSystemDown` | BPMN error → escalation, 0 incidents |
-| S4 | Compensation path | `analyserSystemDown` | order booked then withdrawn, 0 incidents |
+| S4 | Compensation path *(path since removed)* | `analyserSystemDown` | order booked then withdrawn, 0 incidents |
 | S5 | Message correlation | manual `POST /vitals-alerts` ×2 | both handled, treatment not interrupted |
 | S6 | Max-attempts escalation | 4 failed discharge checks | Clinical Director Review, loop converged |
 | S7 | Negative API contract | 9 malformed / hostile requests | all RFC-7807, cross-instance guard holds |
@@ -236,7 +245,8 @@ Every response is RFC-7807 `ProblemDetail`.
 
 The cross-instance guard was verified by consequence, not just status code: after the rejected
 call, the other instance's `Task_Registration` was re-queried and **was still waiting**. The older
-unscoped `POST /tasks/{taskKey}/completion` has no such guard, which is why the scoped route exists.
+unscoped `POST /tasks/{taskKey}/completion` had no such guard, which is why the scoped route exists —
+and why the unscoped one has since been removed entirely.
 
 ---
 

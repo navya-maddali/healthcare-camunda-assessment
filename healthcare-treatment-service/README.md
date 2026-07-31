@@ -93,7 +93,7 @@ Expected on startup:
 ```
 Flyway   : Successfully applied 3 migrations to schema "public", now at version v3
 Deployed : <healthcare-treatment-journey:N>, 2 decisions, 8 forms
-Workers  : lab-test-ordering, lab-result-ingestion, lab-order-cancellation,
+Workers  : lab-test-ordering, lab-result-ingestion,
            vitals-monitoring, vitals-alert-handler, record-archiving
 Started HealthcareTreatmentApplication in ~13 seconds
 ```
@@ -118,7 +118,6 @@ and read back the archive. That is what the Postman collection drives.
 | `POST` | `/cases/{key}/tasks/completion` | Complete **the** waiting task — no key needed |
 | `POST` | `/cases/{key}/tasks/{idOrKey}/completion` | Complete by element id **or** by user task key |
 | `GET` | `/cases/{key}/tasks/outcomes` | Audit trail of every human step completed here |
-| `POST` | `/tasks/{taskKey}/completion` | Complete by key, unscoped |
 | `GET` | `/cases/{key}/variables` | Every process variable, JSON parsed |
 | `GET` | `/cases/{key}/incidents` | Incidents, resolved ones included |
 | `GET` | `/cases/{key}/elements` | Active element instances |
@@ -128,16 +127,16 @@ and read back the archive. That is what the Postman collection drives.
 | `POST` | `/decisions/{decisionId}/evaluation` | Evaluate a DMN table directly |
 | `GET` | `/archive/{caseId}` | Read the archived record back from PostgreSQL |
 
-**Completing tasks.** Three routes exist because they serve different callers. Most of the journey
+**Completing tasks.** Two routes exist because they serve different callers. Most of the journey
 waits on exactly one task, so `POST /cases/{key}/tasks/completion` is the least typing and the one
 to reach for. Naming the task is only necessary during the specialist-consultation phase, where
 several wait at once — and there the no-key route returns `409` naming the contenders rather than
 guessing. The `{idOrKey}` segment takes either form: all digits is a user task key, anything else is
 a BPMN element id. Element ids here are all `Task_*`, so nothing is ambiguous.
 
-Completing by key through `/cases/{key}/tasks/{idOrKey}/completion` checks the task actually belongs
-to that journey. The older unscoped `/tasks/{taskKey}/completion` does not — a key copied from
-another case would complete that other case. Prefer the scoped form.
+Both routes are scoped to `{key}`: a task is proven to be waiting on *this* journey before anything
+is completed, so a key copied from another case fails loudly instead of quietly advancing someone
+else's journey. There is deliberately no unscoped completion route.
 
 Every completion accepts an optional `completedBy`, and writes a row to `case_task_outcome`:
 
@@ -218,13 +217,15 @@ Layering follows the framework convention; dependencies point inwards only.
 ```
 src/main/java/com/aaseya/healthcare/
   HealthcareTreatmentApplication.java
-  domain/              Patient, VitalsReading, VitalsTrend, LabOrder, LabResult,
-                       PatientCaseRecord, PatientCaseEntity,
+  domain/              VitalsReading, VitalsTrend, LabOrder, LabResult,
+                       PatientCaseRecord, PatientCaseEntity, CaseTaskOutcomeRecord,
+                       CaseTaskOutcomeEntity,
                        VitalsAssessment      — the single authority on vitals thresholds
-  application/         PatientCaseArchive, ProcessOrchestrationPort  (outbound ports)
+  application/         PatientCaseArchive, CaseTaskOutcomeArchive,
+                       ProcessOrchestrationPort  (outbound ports)
                        LabOrderingUseCase, LabResultIngestionUseCase,
                        VitalsMonitoringUseCase, ArchiveCaseUseCase, TreatmentJourneyUseCase
-  repository/          PatientCaseJpaRepository
+  repository/          PatientCaseJpaRepository, CaseTaskOutcomeJpaRepository
   web/                 TreatmentJourneyController, HealthcareWebExceptionHandler
     dto/               request and response records
   config/              OpenApiConfig
@@ -232,10 +233,11 @@ src/main/java/com/aaseya/healthcare/
     camunda/           CamundaProcessOrchestration, CamundaDeploymentConfig,
                        CamundaEngineExceptionAdvice, WorkerBeansConfig
       worker/          5 job workers, all extending the framework's BaseWorker
-    persistence/       JpaPatientCaseArchive adapter
+    persistence/       JpaPatientCaseArchive, JpaCaseTaskOutcomeArchive adapters
 src/main/resources/
   application.yml, application-local.yml.example
-  db/migration/        V1__framework_tables.sql, V2__patient_case.sql
+  db/migration/        V1__framework_tables.sql, V2__patient_case.sql,
+                       V3__case_task_outcome.sql
   processes/           healthcare-treatment-journey.bpmn
   dmn/                 triage-care-pathway.dmn, discharge-readiness.dmn
   forms/               8 Tasklist forms
@@ -258,7 +260,6 @@ Two placements are load-bearing rather than stylistic:
 |---|---|---|
 | `lab-test-ordering` | `LabTestOrderWorker` | 3 |
 | `lab-result-ingestion` | `LabResultIngestionWorker` | 3 |
-| `lab-order-cancellation` | `LabOrderCancelWorker` | 3 |
 | `vitals-monitoring` | `VitalsMonitorWorker` | 3 |
 | `vitals-alert-handler` | `VitalsAlertHandlerWorker` | 1 |
 | `record-archiving` | `RecordArchiveWorker` | 3 |
@@ -339,20 +340,10 @@ Start an instance with `"diagnosticSystemDown": true`. `LabTestOrderWorker` rais
 appears in Tasklist. No incident is raised — this is a business outcome routed through a BPMN error,
 not a technical fault.
 
-## Running the compensation path
-
-Start an instance with `"analyserSystemDown": true`. The order is placed successfully and the
-analyser then fails while reporting the result, so there is a booking to withdraw. Compensation runs
-inside the diagnostics sub-process before the error propagates, and the log shows the same order
-being cancelled:
-
-```
-Lab order placed             | orderId=ORD-ECG-896F8E
-Compensated diagnostic order | order=ORD-ECG-896F8E test=ECG status=CANCELLED
-```
-
-Escalation is then reached with the slot already released. The two flags differ deliberately:
-`diagnosticSystemDown` fails at ordering, so nothing is booked and there is nothing to compensate.
+`"analyserSystemDown": true` is the second injection point. It fails one step later: the order *is*
+placed and the analyser then fails while reporting the result. The same boundary error carries the
+case to the same escalation. Use it to show that the failure is caught at branch level and
+propagated, wherever inside the branch it originates.
 
 ---
 
@@ -395,17 +386,15 @@ needs JDK 21; check that `JAVA_HOME` points at a JDK that actually exists on the
 
 ## Documents
 
-- [`POSTMAN-TO-OPERATE.md`](POSTMAN-TO-OPERATE.md) — **start here to run it.** Step by step from a
-  cold start through Postman to watching each stage land in Operate and Tasklist.
+- [`RUNBOOK.md`](RUNBOOK.md) — **start here to run it.** One-page reference, setup, the journey step
+  by step through Postman with what to watch in Operate, the curl equivalent, and a demo beat sheet.
+- [`USE-CASE-2.md`](USE-CASE-2.md) — the assessment requirements this service is built against,
+  extracted verbatim, with the capability matrix and a map of where each requirement is implemented.
 - [`DESIGN-NOTE.md`](DESIGN-NOTE.md) — sub-process choices, DMN hit policies, AI prompt design
   and error-handling strategy (assessment deliverable).
 - [`PROJECT-UNDERSTANDING.md`](PROJECT-UNDERSTANDING.md) — what the assessment asks for and where
   each requirement is implemented.
-- [`RUN-WALKTHROUGH.md`](RUN-WALKTHROUGH.md) — the same journey driven with curl instead of Postman.
-- [`TEST-REPORT.md`](TEST-REPORT.md) — the 2026-07-31 end-to-end scenario sweep: every path,
-  every DMN rule, both failure modes, the negative API contract, and the two silent idempotency
-  defects it uncovered.
-- [`DEMO-SCRIPT.md`](DEMO-SCRIPT.md) — a ~12 minute presented walkthrough, with the point of each beat.
-- [`CHEAT-SHEET.md`](CHEAT-SHEET.md) — one-page reference: endpoints, payloads, task order, flags.
+- [`TEST-REPORT.md`](TEST-REPORT.md) — the end-to-end scenario sweep: every path, every DMN rule,
+  both failure modes, the negative API contract, and the two silent idempotency defects it uncovered.
 - [`postman/POSTMAN-RUN.md`](postman/POSTMAN-RUN.md) — running the collection unattended and what
   each assertion proves.

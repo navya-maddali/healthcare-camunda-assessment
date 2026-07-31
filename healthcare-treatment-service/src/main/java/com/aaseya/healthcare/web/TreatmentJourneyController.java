@@ -137,8 +137,7 @@ public class TreatmentJourneyController {
      * id. The two never collide — every element id in this process is of the form {@code Task_*}.
      *
      * <p>Completing by key here is scoped to {@code key}: a task belonging to another journey is
-     * rejected rather than silently completed. That is the difference from
-     * {@link #completeTask(long, VariablesRequest)}.
+     * rejected rather than silently completed.
      *
      * @param key       instance key
      * @param idOrKey   BPMN element id, or the user task key
@@ -184,20 +183,6 @@ public class TreatmentJourneyController {
         } catch (NumberFormatException e) {
             return false;
         }
-    }
-
-    /**
-     * Completes a task by engine key.
-     *
-     * @param taskKey user task key
-     * @param request variables captured on the form, may be absent
-     */
-    @PostMapping("/tasks/{taskKey}/completion")
-    @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void completeTask(
-            @PathVariable long taskKey,
-            @RequestBody(required = false) VariablesRequest request) {
-        journey.completeTask(taskKey, variablesOf(request));
     }
 
     /**

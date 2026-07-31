@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "b7d41e92-5c38-4a71-9f26-2ad83c105f47",
     "name": "Healthcare Treatment Journey — Service API",
-    "description": "Drives the inpatient admission-to-discharge journey through the healthcare-treatment-service REST API.\n\nThe service owns the Camunda credentials and talks to the cluster on your behalf, so nothing here needs an OAuth token or a cluster URL — only `baseUrl`.\n\n## Setup\n\n1. Import this collection and `healthcare-treatment-journey.postman_environment.json`.\n2. Select the **Healthcare Treatment Journey — Local** environment.\n3. Start the service (see the project README). Confirm with **00 Health → Service health**.\n\n## Running\n\nFolders 01 and 02 are ordered and work top to bottom in the Collection Runner.\n\nZeebe is eventually consistent — a task does not appear the instant the previous one completes. Every `Await …` request re-invokes itself via `setNextRequest` until the expected element shows up, capped by `pollCount`. **Set the Runner delay to 1000 ms** so polling does not spin.\n\n## The vitals loop\n\nFolder 01 drives the revise-plan loop for real: the patient breaches on the first observation, the discharge gate holds them back, the physician revises the plan, and the second observation clears them. No diversion is used to get through it.\n\nThat loop only converges because the vitals element folds the attempt counter into `businessKey` (`caseId + \"-vitals-\" + attempt`). The framework's `IdempotencyGuard` keys on `(businessKey, elementId)`, and both are otherwise identical on every pass — so without that mapping the second `vitals-monitoring` execution is misread as an at-least-once redelivery and completed without running, `vitalsTrend` stays `DETERIORATING`, and the journey loops forever.\n\n`01.13` and `01.18` assert the key of each pass, so losing that mapping fails the run loudly rather than hanging.\n\n## Known blocker (verified 2026-07-29)\n\n- **AI tasks incident.** `Task_HistorySummary` and `Task_DischargeSummary` need an `OPENAI_API_KEY` connector secret in Camunda Console. Without it they raise `ConnectorInputException`. Requests `01.5`, `01.20` and `02.4` step past them using the service's diversion endpoint. Delete those three once the secret exists.",
+    "description": "Drives the inpatient admission-to-discharge journey through the healthcare-treatment-service REST API.\n\nThe service owns the Camunda credentials and talks to the cluster on your behalf, so nothing here needs an OAuth token or a cluster URL — only `baseUrl`.\n\n## Setup\n\n1. Import this collection and `healthcare-treatment-journey.postman_environment.json`.\n2. Select the **Healthcare Treatment Journey — Local** environment.\n3. Start the service (see the project README). Confirm with **00 Health → Service health**.\n\n## Running\n\nFolders 01 and 02 are ordered and work top to bottom in the Collection Runner.\n\nZeebe is eventually consistent — a task does not appear the instant the previous one completes. Every `Await …` request re-invokes itself via `setNextRequest` until the expected element shows up, capped by `pollCount`. **Set the Runner delay to 1000 ms** so polling does not spin.\n\n## The vitals loop\n\nFolder 01 drives the revise-plan loop for real: the patient breaches on the first observation, the discharge gate holds them back, the physician revises the plan, and the second observation clears them. No diversion is used to get through it.\n\nThat loop only converges because the vitals element folds both counters into `businessKey` (`caseId + \"-vitals-\" + directorReviewCount + \"-\" + dischargeAttemptCount`). The framework's `IdempotencyGuard` keys on `(businessKey, elementId)`, and both are otherwise identical on every pass — so without that mapping the second `vitals-monitoring` execution is misread as an at-least-once redelivery and completed without running, `vitalsTrend` stays `DETERIORATING`, and the journey loops forever. The review counter is the outer term because clinical director review resets `dischargeAttemptCount` to zero.\n\n`01.13` and `01.18` assert the key of each pass, so losing that mapping fails the run loudly rather than hanging.\n\n## AI steps\n\n`Task_HistorySummary` and `Task_DischargeSummary` are AI Agent connector tasks and need an `OPENAI_API_TOKEN` connector secret in Camunda Console. Without it both raise an incident. Each has a boundary error that routes the journey past the AI step rather than stranding it.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "event": [
@@ -170,7 +170,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["cases", "{{processInstanceKey}}", "tasks", "Task_Registration", "completion"]
             },
-            "description": "Completes a task by BPMN element id — the service resolves the engine key. Use `/tasks/{taskKey}/completion` in 03 Utilities if you already hold a key."
+            "description": "Completes a task by BPMN element id — the service resolves the engine key. The same route also accepts a numeric user task key if you already hold one; see 02.2 for that form."
           }
         },
         
@@ -528,7 +528,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["cases", "{{processInstanceKey}}", "tasks"]
             },
-            "description": "The gate rejected, so `Task_IncrementCounter` bumped `dischargeAttemptCount` and the journey routed back to treatment planning. Attempts above three would divert via clinical director review first."
+            "description": "The gate rejected, so the readiness task's own output mapping bumped `dischargeAttemptCount` and the discharge gateway routed back to treatment planning. Above three attempts the same gateway diverts to clinical director review instead."
           }
         },
         {
@@ -903,12 +903,12 @@
                   "  pm.test('Registration is waiting', () => pm.expect(hit.name).to.be.a('string'));",
                   "",
                   "  pm.sendRequest({",
-                  "    url: pm.environment.get('baseUrl') + '/tasks/' + hit.userTaskKey + '/completion',",
+                  "    url: pm.environment.get('baseUrl') + '/cases/' + pm.environment.get('errProcessInstanceKey') + '/tasks/' + hit.userTaskKey + '/completion',",
                   "    method: 'POST',",
                   "    header: { 'Content-Type': 'application/json' },",
-                  "    body: { mode: 'raw', raw: JSON.stringify({ variables: { consentObtained: true } }) }",
+                  "    body: { mode: 'raw', raw: JSON.stringify({ completedBy: 'registration-desk', variables: { consentObtained: true } }) }",
                   "  }, (err, res) => {",
-                  "    pm.test('Registration completed by key', () => pm.expect(res.code).to.eql(204));",
+                  "    pm.test('Registration completed by key', () => pm.expect(res.code).to.eql(200));",
                   "  });",
                   "} else {",
                   "  const n = Number(pm.environment.get('pollCount') || 0) + 1;",
@@ -932,7 +932,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["cases", "{{errProcessInstanceKey}}", "tasks"]
             },
-            "description": "Polls for the task, then completes it by engine key from the test script — exercising the `/tasks/{taskKey}/completion` endpoint alongside the element-id form used elsewhere."
+            "description": "Polls for the task, then completes it by engine key from the test script — exercising the numeric-segment branch of `/cases/{key}/tasks/{idOrKey}/completion` alongside the element-id form used everywhere else."
           }
         },
         

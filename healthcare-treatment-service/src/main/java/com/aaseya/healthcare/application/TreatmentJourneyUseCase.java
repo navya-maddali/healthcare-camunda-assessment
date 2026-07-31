@@ -37,6 +37,9 @@ public class TreatmentJourneyUseCase {
     /** Message correlated into the non-interrupting event sub-process. */
     public static final String VITALS_ALERT_MESSAGE = "VitalsAlert";
 
+    /** Model both AI Agent tasks resolve through the {@code aiModel} process variable. */
+    static final String AI_MODEL = "gpt-4o-mini";
+
     private final ProcessOrchestrationPort orchestration;
     private final PatientCaseArchive archive;
     private final CaseTaskOutcomeArchive outcomes;
@@ -102,21 +105,28 @@ public class TreatmentJourneyUseCase {
             payload.putAll(variables);
         }
         payload.put("caseId", resolved);
+        seedAiAgentVariables(payload);
 
         return orchestration.startJourney(PROCESS_ID, payload);
     }
 
     /**
-     * Completes the human step currently waiting at the given element.
+     * Seeds the variables the two AI Agent tasks read as input, unless the caller supplied them.
      *
-     * @param processInstanceKey instance to advance
-     * @param elementId          BPMN element id of the waiting task
-     * @param variables          variables captured on the form
-     * @return the task that was completed
-     * @throws ElementNotActiveException when no task is waiting at that element
+     * <p>Each agent maps {@code =historyAgent.context} / {@code =dischargeAgent.context} as an input,
+     * and Zeebe fails the job outright when an input variable does not exist — so both must be
+     * present from the start, even though the connector overwrites them. {@code historySummary} is
+     * seeded for the same reason: the discharge prompt concatenates it, and it would be absent if the
+     * history agent failed into its boundary error. {@code aiModel} keeps the model out of the BPMN,
+     * so pointing a run at a different model is a variable change rather than a redeploy.
+     *
+     * @param payload start variables, mutated in place
      */
-    public JourneyTask completeStep(long processInstanceKey, String elementId, Map<String, Object> variables) {
-        return completeStep(processInstanceKey, elementId, null, variables);
+    private void seedAiAgentVariables(Map<String, Object> payload) {
+        payload.putIfAbsent("aiModel", AI_MODEL);
+        payload.putIfAbsent("historyAgent", Map.of());
+        payload.putIfAbsent("dischargeAgent", Map.of());
+        payload.putIfAbsent("historySummary", "");
     }
 
     /**
@@ -144,10 +154,9 @@ public class TreatmentJourneyUseCase {
     /**
      * Completes a human step by engine key, scoped to the journey it belongs to.
      *
-     * <p>The scoped form is the one to prefer: it proves the key is waiting on <em>this</em> instance
-     * before completing anything, so a key copied from another case fails loudly instead of quietly
-     * advancing someone else's journey. {@link #completeTask(long, Map)} keeps the unscoped
-     * behaviour for callers that hold a key and nothing else.
+     * <p>Completing by key is always scoped to an instance: the key is proven to be waiting on
+     * <em>this</em> journey before anything is completed, so a key copied from another case fails
+     * loudly instead of quietly advancing someone else's journey.
      *
      * @param processInstanceKey instance the task must belong to
      * @param userTaskKey        task to complete
@@ -196,16 +205,6 @@ public class TreatmentJourneyUseCase {
                     + "); complete one by element id or user task key");
         }
         return complete(processInstanceKey, waiting.get(0), completedBy, variables);
-    }
-
-    /**
-     * Completes a human step by engine key, unscoped.
-     *
-     * @param userTaskKey task to complete
-     * @param variables   variables captured on the form
-     */
-    public void completeTask(long userTaskKey, Map<String, Object> variables) {
-        orchestration.completeTask(userTaskKey, variables);
     }
 
     /**
