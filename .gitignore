@@ -6,7 +6,7 @@ target/
 
 # ---------------------------------------------------------------------------
 # Redundant archive — the unpacked framework source is tracked, so the zip is a
-# duplicate and large enough to slow every clone.
+# duplicate and large enough to slow every
 # ---------------------------------------------------------------------------
 *.zip
 
